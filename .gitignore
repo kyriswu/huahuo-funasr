@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+artifacts/*
+!artifacts/.gitkeep
+data/
+models/
+*.tar
+*.tar.gz
+*.wav
+*.mp3
+*.log
