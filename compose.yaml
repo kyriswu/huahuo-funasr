@@ -1,0 +1,22 @@
+services:
+  funasr:
+    image: funasr-eci:gpu
+    build:
+      context: .
+      target: production
+    gpus: all
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DEVICE: cuda:0
+      API_TOKEN: ${API_TOKEN:-}
+      BATCH_SIZE_S: ${BATCH_SIZE_S:-120}
+      CPU_THREADS: "4"
+      VOICEPRINT_THRESHOLD: ${VOICEPRINT_THRESHOLD:-0.5}
+    volumes:
+      - voiceprints:/data
+    restart: unless-stopped
+    stop_grace_period: 10m
+
+volumes:
+  voiceprints:

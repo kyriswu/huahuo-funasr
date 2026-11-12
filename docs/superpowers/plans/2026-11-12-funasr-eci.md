@@ -26,27 +26,27 @@
 
 ## Task 1: Reproducible model-inclusive image
 
-- [ ] Add a pinned dependency specification and immutable upstream source reference.
-- [ ] Implement `scripts/download_models.py` and `app/model_files.py` to download fixed revisions, create a SHA-256 manifest, and verify local model directories.
-- [ ] Create Docker dependency, model, runtime, and test stages. Build the dependency stage while implementing the service.
-- [ ] Check installed relationships with `pip check`; verify model files after download.
+- [x] Add a pinned dependency specification and immutable upstream source reference.
+- [x] Implement `scripts/download_models.py` and `app/model_files.py` to download fixed revisions, create a SHA-256 manifest, and verify local model directories.
+- [x] Create Docker dependency, model, runtime, and test stages. Build the dependency stage while implementing the service.
+- [x] Check installed relationships with `pip check`; verify model files after download.
 
 ## Task 2: Inference and voiceprint persistence
 
-- [ ] Implement bounded FFmpeg decoding in `app/audio.py`.
-- [ ] Implement normalized cosine matching and atomic JSON storage in `app/voiceprints.py` with model fingerprint validation.
-- [ ] Implement `SpeechEngine.transcribe`, `SpeechEngine.embedding`, and strict accelerator initialization in `app/engine.py`; reuse the pipeline's speaker model.
-- [ ] Add meaningful tests for threshold rejection, persistence, model mismatch, audio failure paths, and repeated request options.
+- [x] Implement bounded FFmpeg decoding in `app/audio.py`.
+- [x] Implement normalized cosine matching and atomic JSON storage in `app/voiceprints.py` with model fingerprint validation.
+- [x] Implement `SpeechEngine.transcribe`, `SpeechEngine.embedding`, and strict accelerator initialization in `app/engine.py`; reuse the pipeline's speaker model.
+- [x] Add meaningful tests for threshold rejection, persistence, model mismatch, audio failure paths, and repeated request options.
 
 ## Task 3: HTTP service
 
-- [ ] Implement multipart endpoints in `app/main.py`, Bearer authentication, inference gating, readiness, limits, and structured errors.
-- [ ] Validate ASGI behavior with an injected fake engine; keep real inference tests separate.
-- [ ] Exercise all endpoint shapes and confirm health probes remain responsive during inference.
+- [x] Implement multipart endpoints in `app/main.py`, Bearer authentication, inference gating, readiness, limits, and structured errors.
+- [x] Validate ASGI behavior with an injected fake engine; keep real inference tests separate.
+- [x] Exercise all endpoint shapes and confirm health probes remain responsive during inference.
 
 ## Task 4: Deployment and acceptance
 
-- [ ] Add Compose, a direct ECI request renderer, and an ACK virtual-node Pod example; keep credentials external.
-- [ ] Document build, GPU run, API usage, model versions, NAS ownership, ACR publication, ECI resource sizing and probe settings.
-- [ ] Build the final image; test actual ASR, a two-speaker recording, voiceprint registration, positive/negative verification and persistence.
-- [ ] Run real inference inside `--network none`; record image ID, size, hardware, observed results and remaining validation limits in `docs/validation.md`.
+- [x] Add Compose, a direct ECI request renderer, and an ACK virtual-node Pod example; keep credentials external.
+- [x] Document build, GPU run, API usage, model versions, NAS ownership, ACR publication, ECI resource sizing and probe settings.
+- [x] Build the final image; test actual ASR, a two-speaker recording, voiceprint registration, positive/negative verification and persistence.
+- [x] Run real inference inside `--network none`; record image ID, size, hardware, observed results and remaining validation limits in `docs/validation.md`.

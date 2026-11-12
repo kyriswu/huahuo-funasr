@@ -1,0 +1,81 @@
+# For an ACK/ACK Serverless cluster with ECI virtual-node scheduling enabled.
+# Replace the image, NAS PVC and image-pull secret with resources in your cluster.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: funasr-gpu
+  labels:
+    app: funasr-gpu
+    alibabacloud.com/eci: "true"
+  annotations:
+    k8s.aliyun.com/eci-use-specs: ecs.gn6i-c4g1.xlarge
+    k8s.aliyun.com/eci-gpu-driver-version: tesla=570
+spec:
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 600
+  securityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+  imagePullSecrets:
+    - name: acr-pull-secret
+  containers:
+    - name: funasr
+      image: REPLACE_WITH_ACR_IMAGE_DIGEST
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: http
+          containerPort: 8000
+      resources:
+        requests:
+          cpu: "4"
+          memory: 12Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "4"
+          memory: 12Gi
+          nvidia.com/gpu: "1"
+      env:
+        - name: DEVICE
+          value: cuda:0
+        - name: API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: funasr-api
+              key: token
+        - name: BATCH_SIZE_S
+          value: "120"
+      volumeMounts:
+        - name: data
+          mountPath: /data
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: http
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: http
+        initialDelaySeconds: 180
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 5
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: funasr-nas
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: funasr
+spec:
+  selector:
+    app: funasr-gpu
+  ports:
+    - port: 8000
+      targetPort: http
+  type: ClusterIP
