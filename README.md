@@ -115,11 +115,11 @@ sudo chown 10001:10001 /mnt/nas/funasr
 
 ## 发布到 ACR 并用于 ECI
 
-先将镜像推送到与 ECI 同地域、可从 VPC 访问的 ACR 仓库：
+镜像已发布到北京 ACR 的 `ai_service/funasr-eci:gpu-20261112` 和 `:gpu`，两个标签均已通过远端 digest 核验，见 [ACR 发布记录](docs/release-acr-20261112.md)。重新发布时使用与 ECI 同地域、可从 VPC 访问的 ACR 仓库：
 
 ```bash
-export ACR_REGISTRY=你的实例-registry.cn-hangzhou.cr.aliyuncs.com
-export ACR_IMAGE="$ACR_REGISTRY/你的命名空间/funasr-eci:gpu-20261112"
+export ACR_REGISTRY=huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com
+export ACR_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci:gpu-20261112"
 docker login "$ACR_REGISTRY"
 docker tag funasr-eci:gpu "$ACR_IMAGE"
 docker push "$ACR_IMAGE"
@@ -130,10 +130,10 @@ docker push "$ACR_IMAGE"
 直接创建 ECI 的请求生成器（不会创建云资源）：
 
 ```bash
-export ECI_REGION_ID=cn-hangzhou
+export ECI_REGION_ID=cn-beijing
 export ECI_VSWITCH_ID=vsw-替换
 export ECI_SECURITY_GROUP_ID=sg-替换
-export ECI_IMAGE="$ACR_IMAGE"
+export ECI_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci@sha256:1434d95d42806a9e748b7bd7dd2272740e8963d0d0823f0c089edea39bc68f60"
 export ECI_NAS_SERVER=替换.nas.aliyuncs.com
 export ECI_NAS_PATH=/funasr
 # API_TOKEN 沿用前面生成的值。
@@ -153,7 +153,7 @@ python3 -m venv .venv-deploy
 .venv-deploy/bin/python scripts/create_eci.py artifacts/eci-request.json --apply
 ```
 
-在 ACK / ACK Serverless 中使用 ECI 虚拟节点时，参见 [deploy/ack-eci-pod.yaml](deploy/ack-eci-pod.yaml)，替换镜像、NAS PVC 和 Secret。示例仅提供 ClusterIP 服务，通过 VPC 内网或你的网关访问 8000 端口。
+在 ACK / ACK Serverless 中使用 ECI 虚拟节点时，参见 [deploy/ack-eci-pod.yaml](deploy/ack-eci-pod.yaml)。镜像已填写本次发布的固定 digest，配置 NAS PVC 和 Secret 后即可使用。示例仅提供 ClusterIP 服务，通过 VPC 内网或你的网关访问 8000 端口。
 
 镜像内的 Docker HEALTHCHECK 主要用于本机；ECI/ACK 请使用示例中显式配置的 `/healthz` 和 `/readyz`。首次启动给模型校验/加载预留时间。长录音为同步请求，客户端和前置网关需配置足够的读取超时。
 

@@ -1,5 +1,5 @@
 # For an ACK/ACK Serverless cluster with ECI virtual-node scheduling enabled.
-# Replace the image, NAS PVC and image-pull secret with resources in your cluster.
+# The ACR image is pinned; configure the NAS PVC and image-pull secret in your cluster.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -20,7 +20,7 @@ spec:
     - name: acr-pull-secret
   containers:
     - name: funasr
-      image: REPLACE_WITH_ACR_IMAGE_DIGEST
+      image: huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com/ai_service/funasr-eci@sha256:1434d95d42806a9e748b7bd7dd2272740e8963d0d0823f0c089edea39bc68f60
       imagePullPolicy: IfNotPresent
       ports:
         - name: http

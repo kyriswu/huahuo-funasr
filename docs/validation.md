@@ -1,6 +1,6 @@
 # 构建与验收记录
 
-日期：2026-11-12。验收对象为本机 Docker 镜像，未创建阿里云计费资源。
+日期：2026-11-12。验收对象为本机 Docker 镜像，未创建 ECI 实例。
 
 ## 镜像
 
@@ -57,4 +57,4 @@ docker run --rm --gpus all --network none \
 
 ## ECI 部署边界
 
-交付包含可用于 ACR 的本地 GPU 镜像、直接 ECI 请求生成/创建脚本和 ACK 虚拟节点 Pod 示例。尚未推送 ACR，尚未创建 ECI 实例；目标地域的 GPU 库存、配额、NAS 权限及 VPC 镜像访问需要在实际部署环境中确认。驱动配置依据 [ECI 官方 GPU 规格文档](https://help.aliyun.com/document_detail/2579486.html)的 2026 年 11 月版本，模板使用 `tesla=570`。
+镜像已推送到北京 ACR，远端内容与本次验收的本地镜像一致，详见 [ACR 发布记录](release-acr-20261112.md)。交付还包含直接 ECI 请求生成/创建脚本和 ACK 虚拟节点 Pod 示例，均已提供固定镜像 digest。尚未创建 ECI 实例；目标地域的 GPU 库存、配额、NAS 权限及 VPC 镜像访问需要在实际部署环境中确认。驱动配置依据 [ECI 官方 GPU 规格文档](https://help.aliyun.com/document_detail/2579486.html)的 2026 年 11 月版本，模板使用 `tesla=570`。

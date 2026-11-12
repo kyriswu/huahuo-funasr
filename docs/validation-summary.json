@@ -30,5 +30,13 @@
   "processing_seconds_automatic": 2.037,
   "default_command_health": "healthy",
   "eci_deployed": false,
-  "acr_pushed": false
+  "acr_pushed": true,
+  "acr_repository": "huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com/ai_service/funasr-eci",
+  "acr_tags": [
+    "gpu-20261112",
+    "gpu"
+  ],
+  "acr_digest": "sha256:1434d95d42806a9e748b7bd7dd2272740e8963d0d0823f0c089edea39bc68f60",
+  "acr_remote_matches_tested_image": true,
+  "acr_pull_verified": true
 }
