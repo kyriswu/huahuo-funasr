@@ -135,17 +135,19 @@ sudo chown 10001:10001 /mnt/nas/funasr
 
 ## 发布到 ACR 并用于 ECI
 
-镜像已发布到北京 ACR 的 `ai_service/funasr-eci:gpu-20261112` 和 `:gpu`，两个标签均已通过远端 digest 核验，见 [ACR 发布记录](docs/release-acr-20261112.md)。重新发布时使用与 ECI 同地域、可从 VPC 访问的 ACR 仓库：
+当前异步/回调/ACK 版已发布到北京 ACR 的 `ai_service/funasr-eci:gpu-async-ack-20261114` 和 `:gpu`，两个标签对应同一已验收镜像，见 [新版 ACR 发布记录](docs/release-acr-20261114.md)。原 `gpu-20261112` 初版仍可按其固定 digest 使用，见 [初版发布记录](docs/release-acr-20261112.md)。重新发布时使用与部署环境同地域、可从 VPC 访问的 ACR 仓库：
 
 ```bash
 export ACR_REGISTRY=huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com
-export ACR_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci:gpu-20261112"
+export ACR_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci:gpu-async-ack-20261114"
 docker login "$ACR_REGISTRY"
 docker tag funasr-eci:gpu "$ACR_IMAGE"
 docker push "$ACR_IMAGE"
 ```
 
 部署时优先使用推送后得到的 `仓库@sha256:...` digest。ECI 需要拉取镜像所需的 ACR 访问能力，**语音服务本身无需公网**；NAS 同样需要 VPC 内可达。
+
+下方 ECI/ACK 配置保留初版固定 digest。当前 A10 ECS Docker 部署使用 [新版教程](docs/ecs-a10-async.md)，包含临时 tmpfs 和回调配置。
 
 直接创建 ECI 的请求生成器（不会创建云资源）：
 
@@ -208,7 +210,7 @@ python3 -m venv .venv-deploy
 
 ## 验证
 
-运行单元和接口检查：
+运行单元和接口检查（当前补丁版可用 `-f Dockerfile.release` 复用已验收基础层）：
 
 ```bash
 docker build --target test -t funasr-eci:test .
@@ -223,3 +225,5 @@ docker run --rm --gpus all --network none \
 ```
 
 验收脚本在 `/data` 下创建独立临时声纹库，结束后清理，不修改现有注册记录。实际构建、硬件、测试结果及 ECI 验证边界见 [docs/validation.md](docs/validation.md)。
+
+异步版另有 47 项检查、真实 GPU 签名回调/ACK 和 Docker 重启验收，见 [异步版验收记录](docs/validation-async.md)。

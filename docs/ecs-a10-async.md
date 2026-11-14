@@ -4,6 +4,12 @@
 
 发布使用 `Dockerfile.release` 继承已验收的固定 digest，只增加服务代码和脚本层，构建时校验模型清单及 Python 包版本与当前约束一致。完整源码构建继续使用 `Dockerfile`；修改模型或依赖时需要完整构建。
 
+本版已推送并核对远端内容，[发布记录](release-acr-20261114.md)包含固定 digest 和验收边界。生产也可将下方 IMAGE 替换为固定地址：
+
+```text
+huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com/ai_service/funasr-eci@sha256:dc3ace750eddecdadae29a0be5cd1364f0591e18501cf90c33227eab2627635c
+```
+
 ## 启动
 
 以下命令在目标 ECS 执行。先确认 `nvidia-smi` 可以看到 A10，Docker 已配置 GPU 支持。镜像拉取约 6 GB，解压后约 9.6 GB，预留足够磁盘。
