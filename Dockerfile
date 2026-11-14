@@ -57,8 +57,9 @@ WORKDIR /opt/app
 COPY --chown=app:app app/ app/
 COPY --chown=app:app scripts/ scripts/
 COPY model-lock.json /opt/app/model-lock.json
-LABEL org.opencontainers.image.title="FunASR ECI offline GPU service" \
-      org.opencontainers.image.description="Offline ASR, speaker diarization and voiceprint recognition" \
+LABEL org.opencontainers.image.title="FunASR offline GPU service" \
+      org.opencontainers.image.description="Offline ASR, speaker diarization, voiceprints and async callbacks with explicit ACK" \
+      org.opencontainers.image.version="1.1.0" \
       org.opencontainers.image.source="https://github.com/modelscope/FunASR" \
       io.funasr.upstream.revision="be264e9382b4fef735536f3d278ee14514098a1a"
 USER 10001:10001

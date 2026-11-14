@@ -20,6 +20,16 @@ class Settings:
     batch_size_s: int = 120
     max_speakers: int = 15
     voiceprint_threshold: float = 0.5
+    max_pending_tasks: int = 16
+    max_task_audio_mb: int = 1024
+    max_task_result_mb: int = 16
+    task_status_ttl_seconds: int = 3600
+    task_history_limit: int = 1024
+    callback_allowed_origins: tuple[str, ...] = ()
+    callback_secret: str = ""
+    callback_timeout_seconds: float = 10.0
+    callback_max_attempts: int = 10
+    callback_retry_seconds: float = 10.0
 
     def __post_init__(self):
         if not re.fullmatch(r"cpu|cuda(?::\d+)?", self.device):
@@ -27,6 +37,8 @@ class Settings:
         for field in (
             "cpu_threads", "max_upload_mb", "max_audio_seconds", "max_voiceprint_seconds",
             "decode_timeout_seconds", "batch_size_s", "max_speakers",
+            "max_pending_tasks", "max_task_audio_mb", "max_task_result_mb",
+            "task_status_ttl_seconds", "task_history_limit", "callback_max_attempts",
         ):
             if getattr(self, field) < 1:
                 raise ValueError(f"{field} must be positive")
@@ -34,6 +46,9 @@ class Settings:
             raise ValueError("VOICEPRINT_THRESHOLD must be in [-1, 1]")
         if not 0 < self.min_voice_seconds <= self.max_voiceprint_seconds:
             raise ValueError("Invalid MIN_VOICE_SECONDS")
+        for field in ("callback_timeout_seconds", "callback_retry_seconds"):
+            if not 0 < getattr(self, field) <= 3600:
+                raise ValueError(f"{field} must be in (0, 3600]")
 
     @classmethod
     def from_env(cls):
@@ -52,4 +67,16 @@ class Settings:
             batch_size_s=int(os.getenv("BATCH_SIZE_S", "120")),
             max_speakers=int(os.getenv("MAX_SPEAKERS", "15")),
             voiceprint_threshold=float(os.getenv("VOICEPRINT_THRESHOLD", "0.5")),
+            max_pending_tasks=int(os.getenv("MAX_PENDING_TASKS", "16")),
+            max_task_audio_mb=int(os.getenv("MAX_TASK_AUDIO_MB", "1024")),
+            max_task_result_mb=int(os.getenv("MAX_TASK_RESULT_MB", "16")),
+            task_status_ttl_seconds=int(os.getenv("TASK_STATUS_TTL_SECONDS", "3600")),
+            task_history_limit=int(os.getenv("TASK_HISTORY_LIMIT", "1024")),
+            callback_allowed_origins=tuple(
+                item.strip() for item in os.getenv("CALLBACK_ALLOWED_ORIGINS", "").split(",") if item.strip()
+            ),
+            callback_secret=os.getenv("CALLBACK_SECRET", ""),
+            callback_timeout_seconds=float(os.getenv("CALLBACK_TIMEOUT_SECONDS", "10")),
+            callback_max_attempts=int(os.getenv("CALLBACK_MAX_ATTEMPTS", "10")),
+            callback_retry_seconds=float(os.getenv("CALLBACK_RETRY_SECONDS", "10")),
         )

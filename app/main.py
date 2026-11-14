@@ -4,20 +4,27 @@ import secrets
 import threading
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import numpy as np
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.audio import AudioError, AudioTooLarge, decode_audio
+from app.callbacks import parse_callback_target
 from app.engine import SpeechEngine
 from app.settings import Settings
+from app.tasks import TaskError, TaskManager
 from app.voiceprints import StoreError, VoiceprintExists, VoiceprintStore, match_voiceprint, validate_id
 
 logger = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
+
+
+class TaskAcknowledgment(BaseModel):
+    event_id: Annotated[str, Field(pattern=r"^evt_[0-9a-f]{32}$")]
 
 
 class RequestGuard:
@@ -62,7 +69,7 @@ class RequestGuard:
         await self.app(scope, bounded_receive, send)
 
 
-def create_app(settings: Settings | None = None, engine_factory=SpeechEngine) -> FastAPI:
+def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, callback_sender=None) -> FastAPI:
     settings = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -71,17 +78,31 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine) ->
         engine = await run_in_threadpool(engine_factory, settings)
         application.state.engine = engine
         application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
+        application.state.tasks = TaskManager(
+            settings, engine, application.state.store, application.state.inference_lock, callback_sender,
+        )
+        application.state.tasks.start()
         application.state.ready = True
-        yield
-        application.state.ready = False
+        try:
+            yield
+        finally:
+            application.state.ready = False
+            await run_in_threadpool(application.state.tasks.close)
 
     application = FastAPI(
-        title="FunASR ECI 离线语音服务", version="1.0.0", lifespan=lifespan,
+        title="FunASR GPU 离线语音服务", version="1.1.0", lifespan=lifespan,
         description="GPU 离线转写、说话人时间段标注、声纹注册与比对。所有时间戳单位为毫秒；相似度为余弦分数。",
     )
     application.state.ready = False
     application.state.inference_lock = threading.Lock()
     application.add_middleware(RequestGuard, settings=settings)
+
+    @application.exception_handler(TaskError)
+    async def task_error(request, error):
+        headers = {"Cache-Control": "no-store"}
+        if error.status == 429:
+            headers["Retry-After"] = "2"
+        return JSONResponse({"detail": error.detail}, error.status, headers=headers)
 
     @application.exception_handler(AudioTooLarge)
     async def audio_too_large(request, error):
@@ -117,6 +138,8 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine) ->
     def inference_slot(request: Request):
         if not request.app.state.ready:
             raise HTTPException(503, "Models are not ready")
+        if request.app.state.tasks.has_pending_inference():
+            raise HTTPException(429, "Async inference tasks are queued; retry later", headers={"Retry-After": "2"})
         lock = request.app.state.inference_lock
         if not lock.acquire(blocking=False):
             raise HTTPException(429, "Inference is busy; retry later", headers={"Retry-After": "2"})
@@ -156,6 +179,52 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine) ->
             clip = decode_audio(file.file, settings, settings.max_audio_seconds)
             records = request.app.state.store.records() if identify_speakers else None
             return engine.transcribe(clip, speaker_count, records, selected_threshold(threshold))
+
+    @application.post("/v1/tasks", dependencies=[Depends(check_token)], status_code=202,
+                      summary="提交内存异步转写任务")
+    def submit_task(
+        request: Request,
+        file: Annotated[UploadFile, File(description="待转写的完整音频，处理完成后删除")],
+        speaker_count: Annotated[int | None, Form(ge=1, le=30)] = None,
+        identify_speakers: Annotated[bool, Form()] = False,
+        threshold: Annotated[float | None, Form(ge=-1, le=1)] = None,
+        callback_url: Annotated[str | None, Form(max_length=2048)] = None,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ):
+        if not request.app.state.ready:
+            raise HTTPException(503, "Models are not ready")
+        target = None
+        if callback_url:
+            if not settings.callback_secret or not settings.callback_allowed_origins:
+                raise HTTPException(503, "Callbacks require CALLBACK_SECRET and CALLBACK_ALLOWED_ORIGINS")
+            try:
+                target = parse_callback_target(callback_url, settings.callback_allowed_origins)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
+        status = request.app.state.tasks.submit(
+            file.file,
+            {"speaker_count": speaker_count, "identify_speakers": identify_speakers,
+             "threshold": selected_threshold(threshold)},
+            target, idempotency_key,
+        )
+        return JSONResponse(status, 202, headers={"Cache-Control": "no-store", "Location": f"/v1/tasks/{status['task_id']}"})
+
+    @application.get("/v1/tasks/{task_id}", dependencies=[Depends(check_token)],
+                     summary="只查询状态，不包含或消费结果")
+    def task_status(request: Request, task_id: str):
+        return JSONResponse(request.app.state.tasks.status(task_id), headers={"Cache-Control": "no-store"})
+
+    @application.get("/v1/tasks/{task_id}/result", dependencies=[Depends(check_token)],
+                     summary="获取完整事件，可重复读取；保存后须 ACK")
+    def task_result(request: Request, task_id: str):
+        return Response(request.app.state.tasks.result(task_id), media_type="application/json", headers={"Cache-Control": "no-store"})
+
+    @application.post("/v1/tasks/{task_id}/ack", dependencies=[Depends(check_token)],
+                      summary="以 event_id 确认消费并清理结果，重复确认幂等")
+    def task_ack(request: Request, task_id: str, acknowledgment: TaskAcknowledgment):
+        return JSONResponse(
+            request.app.state.tasks.ack(task_id, acknowledgment.event_id), headers={"Cache-Control": "no-store"},
+        )
 
     @application.get("/v1/voiceprints", dependencies=[Depends(check_token)])
     def list_voiceprints(request: Request):

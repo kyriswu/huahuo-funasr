@@ -1,6 +1,8 @@
 # FunASR ECI GPU 离线语音服务
 
-基于 [modelscope/FunASR](https://github.com/modelscope/FunASR) 构建面向阿里云 ECI 的 Linux amd64 GPU 镜像。ASR、VAD、标点和 CAM++ 模型均内置，运行时可以完全断网。
+基于 [modelscope/FunASR](https://github.com/modelscope/FunASR) 构建面向阿里云 ECI / ECS Docker 的 Linux amd64 GPU 镜像。ASR、VAD、标点和 CAM++ 模型均内置，推理运行时可以完全断网。支持内存异步任务、带签名的完成回调和显式 ACK；回调需要可访问下游的网络。
+
+A10 24 GB ECS 的 Docker 启动和异步接口完整示例见 [ECS 部署与回调教程](docs/ecs-a10-async.md)。CUDA Runtime 12.6、cuBLAS 和 cuDNN 已内置，不使用宿主机的 CUDA Toolkit；宿主机需 NVIDIA 驱动和 NVIDIA Container Toolkit。支持 CUDA 12.8 的驱动可以运行当前镜像。
 
 支持中文文件转写、带时间戳的说话人标注，以及单人声纹注册、1:1 核验和 1:N 识别。`speaker_0` 之类的编号仅在一份录音内有效；启用声纹匹配后，另返回已注册的身份。说话人标注属于 diarization，不输出分离的重叠人声音轨。
 
@@ -15,6 +17,7 @@ docker build --platform linux/amd64 -t funasr-eci:gpu .
 export API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 docker run -d --name funasr-gpu --gpus all \
   -p 127.0.0.1:8000:8000 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=2g,mode=1777 \
   -e API_TOKEN -e DEVICE=cuda:0 \
   --mount type=volume,src=funasr-voiceprints,dst=/data \
   funasr-eci:gpu
@@ -25,6 +28,23 @@ curl --fail http://127.0.0.1:8000/readyz
 也可 `docker compose up -d --build`，需要支持 `gpus` 配置的 Docker Compose 2.30+。启动时校验全部模型文件，加载成功后 `/readyz` 才返回 200。找不到 GPU 会直接启动失败；诊断时可以显式指定 `DEVICE=cpu`。
 
 OpenAPI 文档：`http://127.0.0.1:8000/docs`，点击 **Authorize** 填入 token。默认单进程、单推理任务；忙时返回 429 和 `Retry-After: 2`。不要增加 Uvicorn workers，扩容时增加 GPU 实例。
+
+## 异步转写、回调与 ACK
+
+长录音建议调用 `POST /v1/tasks`，上传完成后返回 202 和 `task_id`。状态与结果接口分开：
+
+| 接口 | 作用 |
+| --- | --- |
+| `POST /v1/tasks` | 提交转写，表单沿用转写参数，额外支持 `callback_url` |
+| `GET /v1/tasks/{task_id}` | 只查询状态，不含解析结果，不消费 |
+| `GET /v1/tasks/{task_id}/result` | 获取完整事件，可重复获取，不消费 |
+| `POST /v1/tasks/{task_id}/ack` | 保存结果后发送 `{"event_id":"evt_..."}`，确认消费并清理 |
+
+回调直接 POST 完整事件。下游保存结果并按固定 `event_id` 去重后返回 2xx，服务端自动清理，无需另发 ACK。主动获取结果时，业务保存成功后再 ACK。两条确认路径均幂等；已消费取结果返回 410，未完成返回 409，未知或重启前任务返回 404。
+
+原始音频在解析结束后立即删除。未消费结果不设自动过期，包括回调重试耗尽的结果；排队、运行和待领取均计入容量，满额返回 429。任务和结果只存在当前进程及 tmpfs，重启后不恢复；声纹注册数据继续保存在 `/data/voiceprints`。已消费的简要状态默认保留一小时，最多 1024 条。
+
+回调需配置 `CALLBACK_ALLOWED_ORIGINS`（例如 `https://business.example.com,http://10.0.0.8:8080`）和独立 `CALLBACK_SECRET`。来源匹配 scheme、host、port，禁止重定向。HMAC 验签、重试规则和 curl 示例见 [部署教程](docs/ecs-a10-async.md)。
 
 ## 调用
 
@@ -173,6 +193,16 @@ python3 -m venv .venv-deploy
 | `MAX_VOICEPRINT_SECONDS` | `120` | 每条注册/识别/核验音频最长秒数 |
 | `MIN_VOICE_SECONDS` | `3` | 声纹所需最少有效语音秒数 |
 | `DECODE_TIMEOUT_SECONDS` | `120` | FFmpeg 单次解码超时 |
+| `MAX_PENDING_TASKS` | `16` | 上传中、排队、运行及未消费任务总上限 |
+| `MAX_TASK_AUDIO_MB` | `1024` | 全部任务暂存原始音频总大小上限 |
+| `MAX_TASK_RESULT_MB` | `16` | 单任务事件大小上限，超限生成小型失败事件 |
+| `TASK_STATUS_TTL_SECONDS` | `3600` | 仅已消费简要状态的保留时间，未消费不适用 |
+| `TASK_HISTORY_LIMIT` | `1024` | 已消费简要状态最大条数 |
+| `CALLBACK_ALLOWED_ORIGINS` | 空 | 允许的回调来源，逗号分隔；配置后才允许回调 |
+| `CALLBACK_SECRET` | 空 | 独立回调 HMAC-SHA256 密钥，不复用 API token |
+| `CALLBACK_TIMEOUT_SECONDS` | `10` | 回调连接/读写超时 |
+| `CALLBACK_MAX_ATTEMPTS` | `10` | 总发送次数上限，耗尽后结果继续保留 |
+| `CALLBACK_RETRY_SECONDS` | `10` | 重试起始间隔，指数退避、最高一小时，带抖动 |
 
 支持 FFmpeg 可解码的 WAV、MP3、FLAC、M4A、OGG 等格式；统一转换为 16 kHz 单声道。仅接受文件上传，不接受远端 URL。
 

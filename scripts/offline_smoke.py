@@ -6,6 +6,9 @@ The script starts its own localhost-only server and cleans up its private test g
 """
 
 import argparse
+import hashlib
+import hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
@@ -15,6 +18,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -72,18 +76,53 @@ def main():
     negative = join_wavs([other_person, other_person])
     conversation = join_wavs([first, other_person, other_text_same_person, other_person])
     token = secrets.token_hex(24)
+    callback_secret = secrets.token_hex(24)
+    deliveries = []
+    callback_errors = []
+
+    class CallbackReceiver(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            try:
+                stamp, event_id = self.headers["X-FunASR-Timestamp"], self.headers["X-FunASR-Event-Id"]
+                expected = "v1=" + hmac.new(
+                    callback_secret.encode(), stamp.encode() + b"." + event_id.encode() + b"." + body, hashlib.sha256,
+                ).hexdigest()
+                assert hmac.compare_digest(self.headers["X-FunASR-Signature"], expected)
+                assert abs(time.time() - int(stamp)) < 300
+                event = json.loads(body)
+                assert event["event_id"] == event_id and event["result"]["text"].strip()
+                deliveries.append(body)
+                # The first notification fails; the second is accepted only after saving it.
+                self.send_response(503 if len(deliveries) == 1 else 204)
+            except Exception as error:
+                callback_errors.append(type(error).__name__)
+                self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    receiver = ThreadingHTTPServer(("127.0.0.1", 0), CallbackReceiver)
+    receiver_thread = threading.Thread(target=receiver.serve_forever, daemon=True)
+    receiver_thread.start()
+    callback_origin = f"http://127.0.0.1:{receiver.server_port}"
     report = {"checks": [], "device": os.getenv("DEVICE", "cuda:0")}
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
 
-    def request(path, files=None, fields=None, method=None, expected=200, auth=token):
+    def request(path, files=None, fields=None, method=None, expected=200, auth=token, json_body=None):
         headers = {"Authorization": f"Bearer {auth}"}
         body = None
         if files is not None:
             body, content_type = multipart(files, fields or {})
             headers["Content-Type"] = content_type
+        if json_body is not None:
+            body = json.dumps(json_body).encode()
+            headers["Content-Type"] = "application/json"
         operation = Request(base + path, data=body, headers=headers, method=method)
         try:
             with urlopen(operation, timeout=600) as response:
@@ -93,13 +132,26 @@ def main():
         assert status == expected, f"{path}: expected {expected}, got {status}: {data}"
         return data
 
+    def wait_task(task_id, predicate):
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            status = request(f"/v1/tasks/{task_id}")
+            if predicate(status):
+                return status
+            time.sleep(0.05)
+        raise TimeoutError(f"Async task did not reach expected state: {status}")
+
     data_parent = Path(os.getenv("DATA_DIR", "/data"))
     data_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="funasr-smoke-", dir=data_parent) as workspace:
         log_path = Path(workspace) / "server.log"
         process = None
         log = log_path.open("w")
-        environment = {**os.environ, "API_TOKEN": token, "DATA_DIR": workspace}
+        environment = {
+            **os.environ, "API_TOKEN": token, "DATA_DIR": workspace,
+            "CALLBACK_SECRET": callback_secret, "CALLBACK_ALLOWED_ORIGINS": callback_origin,
+            "CALLBACK_RETRY_SECONDS": "0.05",
+        }
 
         def start_server():
             child = subprocess.Popen(
@@ -163,19 +215,45 @@ def main():
             request("/v1/voiceprints/identify", {"file": silence}, expected=422)
             request("/v1/transcriptions", {"file": b"invalid audio"}, expected=422)
             report["checks"].extend(["silence_handling", "invalid_audio_handling"])
+            task_id = request("/v1/tasks", {"file": conversation},
+                              {"speaker_count": 2, "identify_speakers": "true"}, expected=202)["task_id"]
+            wait_task(task_id, lambda state: state["status"] in {"succeeded", "failed"})
+            event = request(f"/v1/tasks/{task_id}/result")
+            assert event == request(f"/v1/tasks/{task_id}/result")
+            assert event["status"] == "succeeded" and len(event["result"]["speakers"]) == 2
+            assert request(f"/v1/tasks/{task_id}")["result_available"]
+            for directory in Path(tempfile.gettempdir()).glob("funasr-tasks-*"):
+                assert not list(directory.iterdir()), "Audio must be deleted before consumption"
+            ack_body = {"event_id": event["event_id"]}
+            assert request(f"/v1/tasks/{task_id}/ack", json_body=ack_body)["acknowledged"]
+            assert request(f"/v1/tasks/{task_id}/ack", json_body=ack_body)["acknowledged"]
+            request(f"/v1/tasks/{task_id}/result", expected=410)
+            report["checks"].extend(["async_result_repeatable_until_ACK", "audio_deleted_before_delivery", "idempotent_ACK_cleanup"])
+            report["async_transcription"] = event["result"]
+            callback_id = request("/v1/tasks", {"file": reference}, {"callback_url": callback_origin + "/completed"}, expected=202)["task_id"]
+            wait_task(callback_id, lambda state: state["consumed_by"] == "callback")
+            assert not callback_errors and len(deliveries) == 2 and deliveries[0] == deliveries[1]
+            request(f"/v1/tasks/{callback_id}/result", expected=410)
+            report["checks"].extend(["signed_callback_retry_same_event", "callback_2xx_cleanup_without_ACK"])
+            discarded_id = request("/v1/tasks", {"file": b"invalid"}, expected=202)["task_id"]
+            assert wait_task(discarded_id, lambda state: state["status"] == "failed")["result_available"]
             stop_server(process)
             process = start_server()
             persisted = request("/v1/voiceprints")["voiceprints"]
             assert {item["speaker_id"] for item in persisted} == {"alice", "bob"}
             again = request("/v1/voiceprints/identify", {"file": positive})
             assert again["speaker_id"] == "alice"
-            report["checks"].append("gallery_persistence_after_process_restart")
+            request(f"/v1/tasks/{discarded_id}", expected=404)
+            report["checks"].extend(["gallery_persistence_after_process_restart", "restart_discards_unconsumed_tasks"])
         except Exception:
             print(log_path.read_text()[-16000:], file=sys.stderr)
             raise
         finally:
             stop_server(process)
             log.close()
+            receiver.shutdown()
+            receiver.server_close()
+            receiver_thread.join(5)
     report["status"] = "passed"
     try:
         hardware = subprocess.run(
