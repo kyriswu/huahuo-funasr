@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+env:
+  ACR_REGION: cn-beijing
+  ACR_HOST: huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com
+  OIDC_PROVIDER_ARN: acs:ram::1472289886746775:oidc-provider/github-actions
+  OIDC_ROLE_ARN: acs:ram::1472289886746775:role/github-actions-release
+
 jobs:
   validate:
     name: Validate API and image configuration
@@ -33,15 +39,31 @@ jobs:
           docker buildx build --check --platform linux/amd64 .
           docker buildx build --check --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb .
 
+  identity:
+    name: Verify shared release identity
+    needs: validate
+    if: github.repository == 'kyriswu/huahuo-funasr' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    steps:
+      - uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          oidc-provider-arn: ${{ env.OIDC_PROVIDER_ARN }}
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          audience: sts.aliyuncs.com
+          role-session-expiration: 900
+          role-session-name: gha-funasr-check-${{ github.run_id }}-${{ github.run_attempt }}
+
   publish:
     name: Publish A10 2 GB candidate to ACR
-    needs: validate
+    needs: identity
     if: >-
       github.repository == 'kyriswu/huahuo-funasr' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (vars.FUNASR_OIDC_RELEASE_ROLE_ARN != '' && vars.FUNASR_ACR_ROLE_ARN != ''))
-    runs-on: ubuntu-latest
+      vars.FUNASR_ACR_VPC_RUNNER != '' && vars.FUNASR_ACR_INSTANCE_ID != '' && vars.FUNASR_ACR_REPOSITORY != ''
+    runs-on: [self-hosted, linux, x64, '${{ vars.FUNASR_ACR_VPC_RUNNER }}']
     timeout-minutes: 45
     concurrency:
       group: huahuo-funasr-acr
@@ -50,24 +72,18 @@ jobs:
       contents: read
       id-token: write
     env:
-      ACR_REGION: cn-beijing
-      ACR_INSTANCE_ID: cri-exln14fep34d4gic
-      ACR_HOST: huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com
-      ACR_REPOSITORY: ai_service/funasr-eci
+      ACR_INSTANCE_ID: ${{ vars.FUNASR_ACR_INSTANCE_ID }}
+      ACR_REPOSITORY: ${{ vars.FUNASR_ACR_REPOSITORY }}
       ACR_TAG: a10-2gb-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      OIDC_PROVIDER_ARN: acs:ram::1472289886746775:oidc-provider/github-actions
-      OIDC_ROLE_ARN: ${{ vars.FUNASR_OIDC_RELEASE_ROLE_ARN }}
-      ACR_ROLE_ARN: ${{ vars.FUNASR_ACR_ROLE_ARN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check ACR identity configuration
+      - name: Check registry endpoint and repository
         run: |
-          if [[ -z "$OIDC_ROLE_ARN" || -z "$ACR_ROLE_ARN" ]]; then
-            echo '::error::Configure FUNASR_OIDC_RELEASE_ROLE_ARN and FUNASR_ACR_ROLE_ARN for the existing ACR repository.'
-            exit 1
-          fi
+          [[ "$ACR_REPOSITORY" =~ ^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_-]*$ ]]
+          status=$(curl -sS --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' "https://$ACR_HOST/v2/")
+          [[ "$status" == 200 || "$status" == 401 ]]
       - name: Build and inspect Linux amd64 image
         run: |
           image="$ACR_HOST/$ACR_REPOSITORY:$ACR_TAG"
@@ -77,7 +93,7 @@ jobs:
       - uses: aliyun/setup-aliyun-cli-action@09a5f86915bb556e27bf050e9a5e339aeb073df5 # v1
         with:
           version: '3.5.3'
-      - name: Obtain shared-provider credentials
+      - name: Obtain temporary ACR credentials
         uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
         with:
           oidc-provider-arn: ${{ env.OIDC_PROVIDER_ARN }}
@@ -85,13 +101,6 @@ jobs:
           audience: sts.aliyuncs.com
           role-session-expiration: 1800
           role-session-name: gha-funasr-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Assume the role in the ACR account
-        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
-        with:
-          role-chaining: true
-          role-to-assume: ${{ env.ACR_ROLE_ARN }}
-          role-session-expiration: 1800
-          role-session-name: gha-funasr-acr-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Push image and verify remote digest
         shell: bash
         run: |

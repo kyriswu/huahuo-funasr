@@ -2,7 +2,7 @@
 
 [验证清单](../deploy/ask-smoke.yaml)为独立的单副本 Deployment，初始副本数为 0。它请求 `ecs.sgn7i-vws-m2.xlarge` 的 A10 1/12，默认驱动为 GRID 470 / CUDA 11.4。候选镜像使用 `cu118` 和轻量标点模型，驱动兼容性和显存峰值需在这一档 Pod 上验收。 [ASK GPU 规格说明](https://help.aliyun.com/zh/ack/serverless-kubernetes/user-guide/create-an-eci-pod)
 
-[GitHub Actions](../.github/workflows/publish-acr.yml)复用 `huahuo-monitor` 的 `github-actions` Provider。配置 `FUNASR_OIDC_RELEASE_ROLE_ARN` 和 `FUNASR_ACR_ROLE_ARN` 后，工作流通过已授权的第一跳角色进入 ACR 所属账号，发布候选镜像并在运行摘要中记录固定 digest。第一跳角色应只授权本仓库的 `main` 使用相关信任，第二跳角色应仅授权相应 ACR 仓库。可以在本机构建同一候选镜像：
+[GitHub Actions](../.github/workflows/publish-acr.yml)复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。该角色需信任本仓库的 `main` 并有权推送目标仓库。发布使用北京内网 ACR `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`。配置现有内网 amd64 Runner 的标签 `FUNASR_ACR_VPC_RUNNER`、目标实例 `FUNASR_ACR_INSTANCE_ID` 和目标仓库路径 `FUNASR_ACR_REPOSITORY` 后，工作流推送候选镜像并在运行摘要中记录固定 digest。可以在本机构建同一候选镜像：
 
 ```bash
 docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --load -t funasr-eci:a10-2gb .
