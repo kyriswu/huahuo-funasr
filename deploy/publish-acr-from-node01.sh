@@ -73,6 +73,12 @@ if [[ -n "$python_pin" && -r "$python_layout/amd64-digest" ]]; then
   node_build_args+=(--build-arg PYTHON_IMAGE=funasr-python
     --build-context "funasr-python=oci-layout://$python_layout@$python_digest")
 fi
+source_pin=$(git -C "$workdir" show "$sha:scripts/prepare_funasr.py" |
+  sed -nE 's/^COMMIT = "([0-9a-f]{40})"$/\1/p')
+source_cache=$state_dir/funasr-source/$source_pin
+if [[ -n "$source_pin" && -r "$source_cache/funasr.tar.gz" ]]; then
+  node_build_args+=(--build-context "funasr-upstream-archive=$source_cache")
+fi
 
 # Include the private temporary directory's suffix to avoid reusing an attempt's tag.
 image=$repository:$profile-$sha-${workdir##*.}

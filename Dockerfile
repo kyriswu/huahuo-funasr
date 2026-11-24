@@ -13,9 +13,13 @@ RUN if [ -n "${DEBIAN_MIRROR}" ]; then \
     && rm -rf /var/lib/apt/lists/*
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
+# A release builder can supply this named context with a verified funasr.tar.gz.
+FROM scratch AS funasr-upstream-archive
 FROM base AS funasr-source
 COPY scripts/prepare_funasr.py /tmp/prepare_funasr.py
-RUN python /tmp/prepare_funasr.py --output /opt/funasr-src
+RUN --mount=from=funasr-upstream-archive,target=/mnt/upstream \
+    if [ -e /mnt/upstream/funasr.tar.gz ]; then set -- --archive /mnt/upstream/funasr.tar.gz; fi \
+    && python /tmp/prepare_funasr.py --output /opt/funasr-src "$@"
 
 FROM base AS torch-dependencies
 ARG BUILD_PROFILE
