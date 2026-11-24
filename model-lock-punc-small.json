@@ -1,0 +1,41 @@
+{
+  "repo": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+  "revision": "v2.0.4",
+  "files": [
+    {
+      "path": "README.md",
+      "size": 11512,
+      "sha256": "30f9029c7b8ad404ed3985640c39a5983cc6d4b51a329518fa471e9b27604855"
+    },
+    {
+      "path": "config.yaml",
+      "size": 810,
+      "sha256": "a56ec10925b06fa976ad51af373396be2b13e1eb8dc62a5426b5adebaba7071d"
+    },
+    {
+      "path": "configuration.json",
+      "size": 373,
+      "sha256": "ebca5ff883e03585b2eec84ce80573f851658bdc61f2887db7d076afe6facd91"
+    },
+    {
+      "path": "example/punc_example.txt",
+      "size": 863,
+      "sha256": "1905542a6e78e344504a3b56cbc772eb391a20eb7eac71830f837852b558dd0c"
+    },
+    {
+      "path": "fig/struct.png",
+      "size": 154534,
+      "sha256": "90e5bdca14b00d4bbcafcbb1e9e2ca0e3905afb2b3b3129e5fd85d49b059812c"
+    },
+    {
+      "path": "model.pt",
+      "size": 291979892,
+      "sha256": "a5818bb9d933805a916eebe41eb41648f7f9caad30b4bd59d56f3ca135421916"
+    },
+    {
+      "path": "tokens.json",
+      "size": 4207480,
+      "sha256": "c960ab87bccea4aa15cf49a59f71973c2c330b46668048cd8da253749ec71ee3"
+    }
+  ]
+}

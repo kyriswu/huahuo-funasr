@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: huahuo-funasr-ask-smoke
+  labels:
+    app.kubernetes.io/name: huahuo-funasr
+    app.kubernetes.io/instance: huahuo-funasr-ask-smoke
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: huahuo-funasr-ask-smoke
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: huahuo-funasr
+        app.kubernetes.io/instance: huahuo-funasr-ask-smoke
+        alibabacloud.com/eci: "true"
+      annotations:
+        k8s.aliyun.com/eci-use-specs: ecs.sgn7i-vws-m2.xlarge
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 600
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: api
+          image: registry.example.invalid/huahuo-funasr:ask-smoke
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: metrics
+              containerPort: 9464
+          resources:
+            requests:
+              cpu: "4"
+              memory: 12Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 12Gi
+              nvidia.com/gpu: "1"
+          env:
+            - name: DEVICE
+              value: cuda:0
+            - name: BATCH_SIZE_S
+              value: "10"
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: huahuo-funasr-ask-smoke
+                  key: token
+            - name: METRICS_PORT
+              value: "9464"
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
