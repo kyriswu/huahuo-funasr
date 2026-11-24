@@ -1,32 +1,58 @@
-# ASK GPU 验证
+# ACS NVIDIA GPU 接入与 ASK ECI 验证
 
-[验证清单](../deploy/ask-smoke.yaml)为独立的单副本 Deployment，初始副本数为 0。它请求 `ecs.sgn7i-vws-m2.xlarge` 的 A10 1/12，默认驱动为 GRID 470 / CUDA 11.4。候选镜像使用 `cu118` 和轻量标点模型，驱动兼容性和显存峰值需在这一档 Pod 上验收。 [ASK GPU 规格说明](https://help.aliyun.com/zh/ack/serverless-kubernetes/user-guide/create-an-eci-pod)
+## 镜像发布
 
 [GitHub Actions](../.github/workflows/publish-acr.yml)复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。测试通过后，工作流调用 Node01 上的 FunASR 固定云助手命令。Node01 构建 Linux amd64 镜像，使用已有内网仓库凭据推送到 `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`，再返回固定 digest。
 
 - 共享角色需信任 `repo:kyriswu@5120703/huahuo-funasr@1460054211:ref:refs/heads/main`，并允许调用 FunASR 的固定命令及查询其结果。
 - Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 和 `funasr-build-profile` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
-- GitHub 运行摘要记录可用于部署的 `FUNASR_IMAGE` digest。
+- 每次发布用同一提交在 Node01 上依次构建两个 `linux/amd64` 镜像。GitHub 运行摘要按版本记录可用于部署的 `FUNASR_IMAGE` digest。
+- Node01 可以使用按上游 SHA256 校验的本地 Python OCI 缓存，避免镜像源返回错误的清单类型。
 
-也可以在本机构建同一候选镜像。
+| 发布版本 | CUDA | 模型与用途 |
+| --- | --- | --- |
+| `a10-2gb` | 11.8 | 使用[轻量中文标点模型](../model-lock-punc-small.json)，默认 `BATCH_SIZE_S=10`，面向 A10 1/12 的 2 GB 显存优化。实际显存峰值需按下文验收。 |
+| `nvidia-modern` | 12.8 | 使用[完整生产模型集](../model-lock.json)，保留大型中英标点模型和 FP32，默认 `BATCH_SIZE_S=120`，用于驱动兼容且显存充足的 GPU。 |
+
+两版均以 `DEVICE=cuda:0` 运行，ASR、VAD、标点和声纹模型都在 GPU 上。CUDA 不可用时启动报错，推理显存耗尽时返回任务错误。
+
+以下命令可在本机构建同一组镜像。
 
 ```bash
-docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --load -t funasr-eci:a10-2gb .
+docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --target ask-release --load -t funasr-eci:a10-2gb .
 docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-modern --target ask-release --load -t funasr-eci:nvidia-modern .
 ```
 
-## 内网申请服务选择镜像
+## 内网服务申请 ACS NVIDIA GPU
 
-内网服务按实际申请到的 NVIDIA 卡型、驱动和显存选择发布摘要。两个镜像均为 `linux/amd64`，使用相同的轻量标点模型，运行时设置 `DEVICE=cuda:0`。
+ACS 整卡优先使用 `nvidia-modern` 的发布摘要，按表填写卡型和驱动。表中的较早架构卡型也可使用这一版，首次接入按下文确认显存峰值和真实转写。需要用 `a10-2gb` 处理其他低显存卡型时，先验证 CUDA 11.8 的驱动、GPU 架构和实际显存需求。Blackwell 卡型使用 `nvidia-modern` 的 CUDA 12.8。 [NVIDIA CUDA 架构矩阵](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html)
 
-| 发布版本 | CUDA | 首批验收机型 |
-| --- | --- | --- |
-| `a10-2gb` | 11.8 | T4、A10、L20 等 Turing、Ampere、Ada 卡型 |
-| `nvidia-modern` | 12.8 | Blackwell 卡型 `G59`、`L20N`、`L20NE`，以及使用兼容驱动的较早 NVIDIA 卡型 |
+| `alibabacloud.com/gpu-model-series` | 架构 | `alibabacloud.com/gpu-driver-version` | 阿里云公开列出的北京可用区 |
+| --- | --- | --- | --- |
+| `T4` | Turing | `580.95.05-open` | 未列出 |
+| `A10` | Ampere | `580.95.05-open` | `cn-beijing-i` |
+| `GN8IS`（L20） | Ada | `580.95.05-open` | `cn-beijing-l` |
+| `G49E` | Ada | `580.95.05-open` | `cn-beijing-l` |
+| `GU8TEF` | Hopper | `580.95.05-open` | `cn-beijing-d` |
+| `GU8TF` | 待实机确认 | `580.95.05-open` | `cn-beijing-d` |
+| `G28Ti` | 待实机确认 | `580.95.05-open` | `cn-beijing-h`、`cn-beijing-i` |
+| `G59` | Blackwell | `580.95.05-open` | `cn-beijing-l` |
+| `L20N` | Blackwell | `580.95.05-open` | `cn-beijing-i` |
+| `L20NE` | Blackwell | `580.126.09-open` | `cn-beijing-l` |
 
-ACS Pod 用 `alibabacloud.com/gpu-model-series` 和 `alibabacloud.com/gpu-driver-version` 标签声明卡型与驱动，`nvidia.com/gpu: 1` 对应整张 GPU。按现有 BestEffort 策略请求后，先确认 `/readyz` 和一次真实转写。旧的 ECI A10 1/12 示例使用不同的调度字段。 [ACS GPU 标签](https://help.aliyun.com/zh/cs/user-guide/pod-gpu-model-and-driver-version) · [ACS 卡型和规格](https://help.aliyun.com/zh/cs/user-guide/gpu-families-supported-by-acs) · [ACS 驱动表](https://help.aliyun.com/zh/cs/user-guide/list-of-gpu-driver-versions-supported-by-acs/) · [NVIDIA 架构矩阵](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html)
+表中是普通按量单卡候选。申请服务按现有地域、交换机和账号可用的实时库存选择，每个 Pod 填一个卡型。`GX8SF`（L20X）的普通按量规格为 8 卡，公开目录只列新加坡。`P16EN`、`PPU810E` 和 `PPU890P` 属于 PPU 系列。 [ACS 卡型和可用区](https://help.aliyun.com/en/cs/user-guide/gpu/) · [ACS GPU 规格](https://help.aliyun.com/en/cs/user-guide/gpu-families-supported-by-acs) · [ACS 驱动表](https://help.aliyun.com/zh/cs/user-guide/list-of-gpu-driver-versions-supported-by-acs/) · [ACK `GN8IS` 示例](https://help.aliyun.com/zh/cs/user-guide/access-acs-computing-power-in-an-ack-cluster) · [阿里云卡型架构](https://help.aliyun.com/en/functioncompute/some-gpu-card-types-do-not-provide-sla-commitment-statement) · [GU8TEF 硬件映射](https://help.aliyun.com/zh/rds/apsaradb-rds-for-mysql/scheduled-scaling-for-rds-custom-ai-nodes) · [NVIDIA Hopper H20](https://docs.nvidia.com/ai-enterprise/release-9/latest/infra-software/vgpu/reference/hopper-h20.html)
+
+在 Pod 标签中设置 `alibabacloud.com/compute-class: gpu`、表中的 `gpu-model-series` 和 `gpu-driver-version`。容器的 `requests` 和 `limits` 均设置为 `cpu: "4"`、`memory: 16Gi` 和 `nvidia.com/gpu: "1"`。ACS 按 1 GiB 步进，16 GiB 覆盖原来的 15.5 GiB。现有策略若使用 ACS BestEffort 算力质量，标签为 `alibabacloud.com/compute-qos: best-effort`，可能发生抢占。`default` 也是 ACS GPU 支持的算力质量。Kubernetes Pod 的资源配置仍按前述 `requests` 和 `limits` 设置。 [ACS GPU 标签](https://help.aliyun.com/zh/cs/user-guide/pod-gpu-model-and-driver-version) · [ACS 算力质量](https://help.aliyun.com/zh/cs/user-guide/acs-pod-instance-overview) · [ACK Serverless 接入 ACS](https://help.aliyun.com/zh/cs/user-guide/use-acs-computing-power-through-the-ack-serverless-cluster)
+
+首次使用每种卡型时，记录 `nvidia-smi` 显示的实际型号、驱动和显存，确认 `/readyz` 返回 `cuda:0`，再用具有代表性的公开样例录音完成一次真实转写，检查 CUDA 显存峰值。`GU8TF` 和 `G28Ti` 首次接入时，也在容器内检查实际计算能力及镜像内的 CUDA 架构列表，通过后再纳入常用候选。
+
+```bash
+python -c 'import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0), torch.cuda.get_arch_list())'
+```
 
 ## ECI 2 GB 验证
+
+[验证清单](../deploy/ask-smoke.yaml)为初始副本数为 0 的单副本 Deployment，使用 ECI 专有的 `k8s.aliyun.com/eci-use-specs` 请求 `ecs.sgn7i-vws-m2.xlarge` 的 A10 1/12。该档默认驱动为 GRID 470 / CUDA 11.4，使用 `a10-2gb` 镜像和 `BATCH_SIZE_S=10` 验收 CUDA 启动、转写和显存峰值。 [ASK ECI GPU 规格](https://help.aliyun.com/zh/ack/serverless-kubernetes/user-guide/create-an-eci-pod)
 
 选择已有的 ASK 验证命名空间和镜像访问权限。复用该命名空间的镜像拉取配置，必要时在 Pod 模板中引用已有的 `imagePullSecrets`。清单从同命名空间的 `huahuo-funasr-ask-smoke` Secret 的 `token` 键读取测试 API token。声纹和任务数据只写入该验证 Pod。
 

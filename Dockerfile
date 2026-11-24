@@ -63,7 +63,7 @@ import json
 import os
 from pathlib import Path
 
-if os.environ["BUILD_PROFILE"] in {"a10-2gb", "nvidia-modern"}:
+if os.environ["BUILD_PROFILE"] == "a10-2gb":
     lock_path = Path("model-lock.json")
     lock = json.loads(lock_path.read_text())
     lock["models"]["punc"] = json.loads(Path("model-lock-punc-small.json").read_text())
@@ -72,8 +72,9 @@ PY
 RUN python scripts/download_models.py --lock model-lock.json --output /opt/models
 
 FROM base AS runtime
+ARG BUILD_PROFILE
 ENV PATH=/opt/venv/bin:$PATH \
-    DEVICE=cuda:0 MODEL_ROOT=/opt/models DATA_DIR=/data \
+    DEVICE=cuda:0 FUNASR_BUILD_PROFILE=${BUILD_PROFILE} MODEL_ROOT=/opt/models DATA_DIR=/data \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 MODELSCOPE_OFFLINE=1 \
     HF_HOME=/tmp/funasr-cache/huggingface MODELSCOPE_CACHE=/tmp/funasr-cache/modelscope \
     NUMBA_CACHE_DIR=/tmp/funasr-cache/numba OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
@@ -120,6 +121,7 @@ import torch
 
 from app.main import app
 from app.model_files import verify_models
+from app.settings import Settings
 
 profile = os.environ["BUILD_PROFILE"]
 expected_cuda = {"a10-2gb": "11.8", "nvidia-modern": "12.8"}.get(profile)
@@ -130,6 +132,10 @@ required_arches.update({"sm_86"} if profile == "a10-2gb" else {"sm_100", "sm_120
 compiled_arches = set((torch._C._cuda_getArchFlags() or "").split())
 if missing_arches := required_arches - compiled_arches:
     raise RuntimeError(f"PyTorch for ASK {profile!r} lacks GPU kernels for {sorted(missing_arches)}")
+settings = Settings.from_env()
+expected_batch_size = 10 if profile == "a10-2gb" else 120
+if settings.device != "cuda:0" or settings.batch_size_s != expected_batch_size:
+    raise RuntimeError(f"Unexpected inference defaults for ASK profile {profile!r}")
 if not any(route.path == "/readyz" for route in app.routes):
     raise RuntimeError("Missing readiness endpoint")
 verify_models(Path("/opt/models"), Path("/opt/app/model-lock.json"))

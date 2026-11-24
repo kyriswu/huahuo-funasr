@@ -56,6 +56,7 @@ class Settings:
     @classmethod
     def from_env(cls):
         metrics_port = os.getenv("METRICS_PORT")
+        default_batch_size_s = "10" if os.getenv("FUNASR_BUILD_PROFILE") == "a10-2gb" else "120"
         return cls(
             model_root=Path(os.getenv("MODEL_ROOT", "/opt/models")),
             model_lock=Path(os.getenv("MODEL_LOCK", "/opt/app/model-lock.json")),
@@ -68,7 +69,7 @@ class Settings:
             max_voiceprint_seconds=int(os.getenv("MAX_VOICEPRINT_SECONDS", "120")),
             min_voice_seconds=float(os.getenv("MIN_VOICE_SECONDS", "3")),
             decode_timeout_seconds=int(os.getenv("DECODE_TIMEOUT_SECONDS", "120")),
-            batch_size_s=int(os.getenv("BATCH_SIZE_S", "120")),
+            batch_size_s=int(os.getenv("BATCH_SIZE_S", default_batch_size_s)),
             max_speakers=int(os.getenv("MAX_SPEAKERS", "15")),
             voiceprint_threshold=float(os.getenv("VOICEPRINT_THRESHOLD", "0.5")),
             max_pending_tasks=int(os.getenv("MAX_PENDING_TASKS", "16")),

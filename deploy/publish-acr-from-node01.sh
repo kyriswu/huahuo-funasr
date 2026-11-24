@@ -58,6 +58,18 @@ verify_main_tip() {
 }
 verify_main_tip
 
+# Use the verified amd64 base cached on Node01 when it matches this commit's Python pin.
+python_pin=$(git -C "$workdir" show "$sha:Dockerfile" |
+  sed -nE 's/^ARG PYTHON_IMAGE=.*@sha256:([0-9a-f]{64})$/\1/p')
+base_args=()
+python_layout=$state_dir/python-oci/$python_pin
+if [[ -n "$python_pin" && -r "$python_layout/amd64-digest" ]]; then
+  python_digest=$(<"$python_layout/amd64-digest")
+  [[ "$python_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'invalid cached amd64 Python digest'
+  base_args=(--build-arg PYTHON_IMAGE=funasr-python
+    --build-context "funasr-python=oci-layout://$python_layout@$python_digest")
+fi
+
 # Include the private temporary directory's suffix to avoid reusing an attempt's tag.
 image=$repository:$profile-$sha-${workdir##*.}
 deadline=$((SECONDS + 4350))
@@ -68,7 +80,7 @@ build_image() {
     timeout --signal=INT --kill-after=15s "${remaining}s" \
     docker buildx build --builder "$builder" --progress=plain --platform linux/amd64 \
       --build-arg "BUILD_PROFILE=$profile" --target ask-release \
-      --label "org.opencontainers.image.revision=$sha" "$@" -
+      --label "org.opencontainers.image.revision=$sha" "${base_args[@]}" "$@" -
 }
 
 build_image --output type=cacheonly
