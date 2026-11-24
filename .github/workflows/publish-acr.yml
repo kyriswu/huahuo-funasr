@@ -104,7 +104,8 @@ jobs:
           printf '%s' "$password" | docker login "$ACR_HOST" --username "$username" --password-stdin
           unset auth username password
           repository="$ACR_HOST/$ACR_REPOSITORY"
-          docker push "$repository:$ACR_TAG"
-          digest=$(docker manifest inspect --verbose "$repository:$ACR_TAG" | jq -er '.Descriptor.digest')
+          docker push "$repository:$ACR_TAG" | tee "$DOCKER_CONFIG/push.log"
+          digest=$(awk '$2 == "digest:" {print $3}' "$DOCKER_CONFIG/push.log")
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker manifest inspect "$repository@$digest" > /dev/null
           printf '### A10 2 GB candidate\n\n`%s@%s`\n' "$repository" "$digest" >> "$GITHUB_STEP_SUMMARY"
