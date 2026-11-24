@@ -52,9 +52,17 @@ exec >>"$log_file" 2>&1
 
 git -C "$workdir" init -q
 verify_main_tip() {
-  GIT_TERMINAL_PROMPT=0 git -C "$workdir" fetch -q --no-tags --depth=1 "$source_url" refs/heads/main
-  [[ "$(git -C "$workdir" rev-parse --verify 'FETCH_HEAD^{commit}')" == "$sha" ]] ||
-    fail 'requested revision is no longer the tip of FunASR main'
+  local attempt
+  for attempt in 1 2 3; do
+    if GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s 25s \
+      git -C "$workdir" fetch -q --no-tags --depth=1 "$source_url" refs/heads/main; then
+      [[ "$(git -C "$workdir" rev-parse --verify 'FETCH_HEAD^{commit}')" == "$sha" ]] ||
+        fail 'requested revision is no longer the tip of FunASR main'
+      return
+    fi
+    ((attempt == 3)) || sleep "$attempt"
+  done
+  fail 'could not verify FunASR main from GitHub'
 }
 verify_main_tip
 

@@ -8,6 +8,7 @@
 - Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 和 `funasr-build-profile` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
 - 每次发布用同一提交在 Node01 上依次构建两个 `linux/amd64` 镜像。GitHub 运行摘要按版本记录可用于部署的 `FUNASR_IMAGE` digest。
 - Node01 使用阿里云镜像站下载构建依赖，并核验 PyTorch 和 TorchAudio wheel 的上游 SHA256。构建时可以复用匹配的 Python OCI 缓存及通过原始 SHA256 校验的 FunASR 源码包。
+- 两版共用 BuildKit 的模型缓存。下载中断后可以续传，权重的大小及 SHA256 匹配模型清单后才会写入镜像。
 
 | 发布版本 | CUDA | 模型与用途 |
 | --- | --- | --- |

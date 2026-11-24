@@ -94,7 +94,8 @@ if os.environ["BUILD_PROFILE"] == "a10-2gb":
     lock["models"]["punc"] = json.loads(Path("model-lock-punc-small.json").read_text())
     lock_path.write_text(json.dumps(lock, indent=2, ensure_ascii=False) + "\n")
 PY
-RUN python scripts/download_models.py --lock model-lock.json --output /opt/models
+RUN --mount=type=cache,id=funasr-models-v1,target=/var/cache/funasr-models,sharing=locked \
+    python scripts/download_models.py --lock model-lock.json --output /opt/models --cache-dir /var/cache/funasr-models
 
 FROM base AS runtime
 ARG BUILD_PROFILE
