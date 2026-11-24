@@ -60,7 +60,8 @@ verify_main_tip
 
 node_build_args=(
   --build-arg DEBIAN_MIRROR=http://mirrors.cloud.aliyuncs.com
-  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+  --build-arg PIP_INDEX_URL=http://mirrors.cloud.aliyuncs.com/pypi/simple
+  --build-arg PIP_TRUSTED_HOST=mirrors.cloud.aliyuncs.com
   --build-arg TORCH_WHEEL_MIRROR=http://mirrors.cloud.aliyuncs.com/pytorch-wheels
 )
 # Use the verified amd64 base cached on Node01 when it matches this commit's Python pin.

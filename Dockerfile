@@ -12,6 +12,7 @@ RUN if [ -n "${DEBIAN_MIRROR}" ]; then \
     ca-certificates ffmpeg libsndfile1 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST
 
 # A release builder can supply this named context with a verified funasr.tar.gz.
 FROM scratch AS funasr-upstream-archive
