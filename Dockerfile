@@ -103,5 +103,20 @@ COPY --chown=app:app tests/ tests/
 USER 10001:10001
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
 
+# Validate the amd64 ASK candidate inside BuildKit, including on an ARM64 build host.
+FROM runtime AS ask-release
+RUN --network=none python - <<'PY'
+from pathlib import Path
+
+import torch
+
+from app.main import app
+from app.model_files import verify_models
+
+if torch.version.cuda != "11.8" or not any(route.path == "/readyz" for route in app.routes):
+    raise RuntimeError("Unexpected CUDA runtime or missing readiness endpoint")
+verify_models(Path("/opt/models"), Path("/opt/app/model-lock.json"))
+PY
+
 # Keep the production image as the default build target.
 FROM runtime AS production
