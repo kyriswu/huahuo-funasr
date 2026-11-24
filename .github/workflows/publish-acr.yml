@@ -1,0 +1,110 @@
+name: Publish FunASR GPU image
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate API and image configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.11'
+      - name: Run API tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python -m pip install -c constraints.txt -r requirements-test.txt fastapi numpy python-multipart prometheus-client
+          python -m pytest -q -p no:cacheprovider tests
+      - name: Check Docker profiles
+        run: |
+          docker buildx build --check --platform linux/amd64 .
+          docker buildx build --check --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb .
+
+  publish:
+    name: Publish A10 2 GB candidate to ACR
+    needs: validate
+    if: >-
+      github.repository == 'kyriswu/huahuo-funasr' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (vars.FUNASR_OIDC_RELEASE_ROLE_ARN != '' && vars.FUNASR_ACR_ROLE_ARN != ''))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: huahuo-funasr-acr
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACR_REGION: cn-beijing
+      ACR_INSTANCE_ID: cri-exln14fep34d4gic
+      ACR_HOST: huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com
+      ACR_REPOSITORY: ai_service/funasr-eci
+      ACR_TAG: a10-2gb-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      OIDC_PROVIDER_ARN: acs:ram::1472289886746775:oidc-provider/github-actions
+      OIDC_ROLE_ARN: ${{ vars.FUNASR_OIDC_RELEASE_ROLE_ARN }}
+      ACR_ROLE_ARN: ${{ vars.FUNASR_ACR_ROLE_ARN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check ACR identity configuration
+        run: |
+          if [[ -z "$OIDC_ROLE_ARN" || -z "$ACR_ROLE_ARN" ]]; then
+            echo '::error::Configure FUNASR_OIDC_RELEASE_ROLE_ARN and FUNASR_ACR_ROLE_ARN for the existing ACR repository.'
+            exit 1
+          fi
+      - name: Build and inspect Linux amd64 image
+        run: |
+          image="$ACR_HOST/$ACR_REPOSITORY:$ACR_TAG"
+          docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --load --tag "$image" .
+          docker run --rm --network none --entrypoint python "$image" -c \
+            'import torch; from app.main import app; assert torch.version.cuda == "11.8"'
+      - uses: aliyun/setup-aliyun-cli-action@09a5f86915bb556e27bf050e9a5e339aeb073df5 # v1
+        with:
+          version: '3.5.3'
+      - name: Obtain shared-provider credentials
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          oidc-provider-arn: ${{ env.OIDC_PROVIDER_ARN }}
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          audience: sts.aliyuncs.com
+          role-session-expiration: 1800
+          role-session-name: gha-funasr-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Assume the role in the ACR account
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1.1.0
+        with:
+          role-chaining: true
+          role-to-assume: ${{ env.ACR_ROLE_ARN }}
+          role-session-expiration: 1800
+          role-session-name: gha-funasr-acr-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Push image and verify remote digest
+        shell: bash
+        run: |
+          export DOCKER_CONFIG=$(mktemp -d)
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          auth=$(aliyun cr GetAuthorizationToken --region "$ACR_REGION" --InstanceId "$ACR_INSTANCE_ID")
+          username=$(jq -er '.TempUsername | select(length > 0)' <<< "$auth")
+          password=$(jq -er '.AuthorizationToken | select(length > 0)' <<< "$auth")
+          printf '::add-mask::%s\n' "$password"
+          printf '%s' "$password" | docker login "$ACR_HOST" --username "$username" --password-stdin
+          unset auth username password
+          repository="$ACR_HOST/$ACR_REPOSITORY"
+          docker push "$repository:$ACR_TAG"
+          digest=$(docker manifest inspect --verbose "$repository:$ACR_TAG" | jq -er '.Descriptor.digest')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '### A10 2 GB candidate\n\n`%s@%s`\n' "$repository" "$digest" >> "$GITHUB_STEP_SUMMARY"

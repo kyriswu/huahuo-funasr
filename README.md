@@ -177,6 +177,8 @@ python3 -m venv .venv-deploy
 
 在 ACK / ACK Serverless 中使用 ECI 虚拟节点时，参见 [deploy/ack-eci-pod.yaml](deploy/ack-eci-pod.yaml)。镜像已填写本次发布的固定 digest，配置 NAS PVC 和 Secret 后即可使用。示例仅提供 ClusterIP 服务，通过 VPC 内网或你的网关访问 8000 端口。
 
+A10 1/12 的候选镜像发布、按需启停和 Prometheus 验收见 [ASK GPU 验证](docs/ask.md)。
+
 镜像内的 Docker HEALTHCHECK 主要用于本机；ECI/ACK 请使用示例中显式配置的 `/healthz` 和 `/readyz`。首次启动给模型校验/加载预留时间。长录音为同步请求，客户端和前置网关需配置足够的读取超时。
 
 ## 参数
@@ -187,6 +189,7 @@ python3 -m venv .venv-deploy
 | `API_TOKEN` | 空 | 非空时 `/v1/*` 要求 Bearer token；探针不鉴权 |
 | `DATA_DIR` | `/data` | 声纹目录的父目录 |
 | `CPU_THREADS` | `4` | 推理和聚类 CPU 线程数 |
+| `METRICS_PORT` | 空 | 独立的 Prometheus 抓取端口，ASK 验证使用 `9464` |
 | `BATCH_SIZE_S` | `120` | ASR 动态组批总音频秒数，显存不足时减小 |
 | `MAX_SPEAKERS` | `15` | 自动聚类人数上限，显式 `speaker_count` 优先 |
 | `VOICEPRINT_THRESHOLD` | `0.5` | 默认原始余弦匹配阈值 |
