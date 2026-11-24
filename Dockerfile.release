@@ -3,10 +3,14 @@
 ARG RUNTIME_IMAGE=huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com/ai_service/funasr-eci@sha256:1434d95d42806a9e748b7bd7dd2272740e8963d0d0823f0c089edea39bc68f60
 FROM ${RUNTIME_IMAGE} AS runtime
 COPY --chown=10001:10001 model-lock.json constraints.txt /tmp/release-check/
+# Add the metrics client to the immutable runtime before checking the full lock.
+USER root
+RUN python -m pip install --no-deps "$(sed -n '/^prometheus-client==/p' /tmp/release-check/constraints.txt)"
 RUN python -c "from pathlib import Path; from importlib.metadata import version; p=Path('/tmp/release-check'); assert (p/'model-lock.json').read_bytes()==Path('/opt/app/model-lock.json').read_bytes(), 'Use full Dockerfile for changed models'; pins=[line.split('==') for line in (p/'constraints.txt').read_text().splitlines() if line and not line.startswith('#')]; mismatch={name:(expected,version(name)) for name,expected in pins if version(name)!=expected}; assert not mismatch, mismatch" \
     && rm -r /tmp/release-check
 COPY --chown=10001:10001 app/ app/
 COPY --chown=10001:10001 scripts/ scripts/
+USER 10001:10001
 LABEL org.opencontainers.image.title="FunASR offline GPU service" \
       org.opencontainers.image.description="Offline ASR, speaker diarization, voiceprints and async callbacks with explicit ACK" \
       org.opencontainers.image.version="1.1.0"

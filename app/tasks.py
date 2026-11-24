@@ -56,9 +56,10 @@ class Task:
 
 
 class TaskManager:
-    def __init__(self, settings: Settings, engine, store, inference_lock, sender=None):
+    def __init__(self, settings: Settings, engine, store, inference_lock, metrics, sender=None):
         self.settings, self.engine, self.store = settings, engine, store
         self.inference_lock = inference_lock
+        self.metrics = metrics
         self.sender = sender or send_callback
         self._condition = threading.Condition()
         self._tasks: dict[str, Task] = {}
@@ -93,6 +94,10 @@ class TaskManager:
     def has_pending_inference(self) -> bool:
         with self._condition:
             return any(task.status in {"uploading", "queued", "running"} for task in self._tasks.values())
+
+    def capacity_usage(self) -> tuple[int, int]:
+        with self._condition:
+            return self._active, self._audio_bytes
 
     def _prune_locked(self):
         now = time.time()
@@ -248,10 +253,11 @@ class TaskManager:
     def _run(self, task: Task) -> tuple[dict | None, dict | None]:
         clip = None
         try:
-            with task.path.open("rb") as source:
+            with self.metrics.stage.labels("async", "decode").time(), task.path.open("rb") as source:
                 clip = decode_audio(source, self.settings, self.settings.max_audio_seconds)
             records = self.store.records() if task.options["identify_speakers"] else None
-            result = self.engine.transcribe(clip, task.options["speaker_count"], records, task.options["threshold"])
+            with self.metrics.stage.labels("async", "inference").time():
+                result = self.engine.transcribe(clip, task.options["speaker_count"], records, task.options["threshold"])
             return result, None
         except AudioTooLarge as error:
             return None, {"code": "audio_too_large", "message": str(error)}
@@ -262,6 +268,7 @@ class TaskManager:
         except Exception as error:
             logger.error("Async inference failed: %s", type(error).__name__)
             if type(error).__name__ == "OutOfMemoryError":
+                self.metrics.gpu_oom.inc()
                 return None, {"code": "gpu_memory_exhausted", "message": "Reduce BATCH_SIZE_S or audio length"}
             return None, {"code": "processing_failed", "message": "Processing failed; check service logs"}
         finally:
@@ -285,6 +292,7 @@ class TaskManager:
                          error={"code": "result_unavailable", "message": "Result is invalid or exceeds MAX_TASK_RESULT_MB"})
             body = json.dumps(event, separators=(",", ":")).encode()
         with self._condition:
+            self.metrics.completed.labels(status).inc()
             task.status, task.body, task.finished = status, body, time.time()
             task.callback_next = time.monotonic()
             self._condition.notify_all()
@@ -344,11 +352,13 @@ class TaskManager:
                 logger.warning("Callback attempt failed: %s", type(error).__name__)
                 code = None
             body = None
+            delivered = code is not None and 200 <= code < 300
+            self.metrics.callback_attempts.labels("delivered" if delivered else "failed").inc()
             with self._condition:
                 if task.consumed is not None:
                     continue
                 task.callback_http_status = code
-                if code is not None and 200 <= code < 300:
+                if delivered:
                     self._consume_locked(task, "callback")
                 elif task.callback_attempts >= self.settings.callback_max_attempts:
                     task.callback_status = "failed"

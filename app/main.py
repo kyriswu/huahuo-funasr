@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager, contextmanager
 import logging
 import secrets
 import threading
+import time
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -15,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.audio import AudioError, AudioTooLarge, decode_audio
 from app.callbacks import parse_callback_target
 from app.engine import SpeechEngine
+from app.metrics import Metrics
 from app.settings import Settings
 from app.tasks import TaskError, TaskManager
 from app.voiceprints import StoreError, VoiceprintExists, VoiceprintStore, match_voiceprint, validate_id
@@ -75,19 +77,33 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         application.state.ready = False
-        engine = await run_in_threadpool(engine_factory, settings)
-        application.state.engine = engine
-        application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
-        application.state.tasks = TaskManager(
-            settings, engine, application.state.store, application.state.inference_lock, callback_sender,
+        started = time.monotonic()
+        metrics = application.state.metrics = Metrics()
+        server = application.state.metrics_server = (
+            metrics.listen(settings.metrics_port) if settings.metrics_port is not None else None
         )
-        application.state.tasks.start()
-        application.state.ready = True
         try:
-            yield
+            engine = await run_in_threadpool(engine_factory, settings)
+            application.state.engine = engine
+            application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
+            tasks = application.state.tasks = TaskManager(
+                settings, engine, application.state.store, application.state.inference_lock, metrics, callback_sender,
+            )
+            metrics.attach(tasks, engine, settings.device)
+            tasks.start()
+            application.state.ready = True
+            metrics.startup.set(time.monotonic() - started)
+            metrics.ready.set(1)
+            try:
+                yield
+            finally:
+                application.state.ready = False
+                metrics.ready.set(0)
+                await run_in_threadpool(tasks.close)
         finally:
-            application.state.ready = False
-            await run_in_threadpool(application.state.tasks.close)
+            if server is not None:
+                await run_in_threadpool(server.shutdown)
+                server.server_close()
 
     application = FastAPI(
         title="FunASR GPU 离线语音服务", version="1.1.0", lifespan=lifespan,
@@ -126,6 +142,7 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         # Avoid logging exception values, which may contain input text or other audio data.
         logger.error("Request failed: %s", type(error).__name__)
         if type(error).__name__ == "OutOfMemoryError":
+            request.app.state.metrics.gpu_oom.inc()
             return JSONResponse({"detail": "GPU memory exhausted; reduce BATCH_SIZE_S or audio length"}, 503)
         return JSONResponse({"detail": "Processing failed; check service logs"}, 500)
 
@@ -176,9 +193,12 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         threshold: Annotated[float | None, Form(ge=-1, le=1)] = None,
     ):
         with inference_slot(request) as engine:
-            clip = decode_audio(file.file, settings, settings.max_audio_seconds)
+            metrics = request.app.state.metrics
+            with metrics.stage.labels("sync", "decode").time():
+                clip = decode_audio(file.file, settings, settings.max_audio_seconds)
             records = request.app.state.store.records() if identify_speakers else None
-            return engine.transcribe(clip, speaker_count, records, selected_threshold(threshold))
+            with metrics.stage.labels("sync", "inference").time():
+                return engine.transcribe(clip, speaker_count, records, selected_threshold(threshold))
 
     @application.post("/v1/tasks", dependencies=[Depends(check_token)], status_code=202,
                       summary="提交内存异步转写任务")

@@ -30,10 +30,13 @@ class Settings:
     callback_timeout_seconds: float = 10.0
     callback_max_attempts: int = 10
     callback_retry_seconds: float = 10.0
+    metrics_port: int | None = None
 
     def __post_init__(self):
         if not re.fullmatch(r"cpu|cuda(?::\d+)?", self.device):
             raise ValueError("DEVICE must be cpu, cuda, or cuda:N")
+        if self.metrics_port is not None and not 0 <= self.metrics_port <= 65535:
+            raise ValueError("METRICS_PORT must be a valid TCP port")
         for field in (
             "cpu_threads", "max_upload_mb", "max_audio_seconds", "max_voiceprint_seconds",
             "decode_timeout_seconds", "batch_size_s", "max_speakers",
@@ -52,6 +55,7 @@ class Settings:
 
     @classmethod
     def from_env(cls):
+        metrics_port = os.getenv("METRICS_PORT")
         return cls(
             model_root=Path(os.getenv("MODEL_ROOT", "/opt/models")),
             model_lock=Path(os.getenv("MODEL_LOCK", "/opt/app/model-lock.json")),
@@ -79,4 +83,5 @@ class Settings:
             callback_timeout_seconds=float(os.getenv("CALLBACK_TIMEOUT_SECONDS", "10")),
             callback_max_attempts=int(os.getenv("CALLBACK_MAX_ATTEMPTS", "10")),
             callback_retry_seconds=float(os.getenv("CALLBACK_RETRY_SECONDS", "10")),
+            metrics_port=int(metrics_port) if metrics_port else None,
         )

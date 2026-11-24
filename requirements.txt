@@ -2,6 +2,7 @@
 fastapi==0.121.2
 uvicorn==0.38.0
 python-multipart==0.0.22
+prometheus-client==0.23.1
 pydantic==2.12.4
 numpy==1.26.4
 scipy==1.15.3
