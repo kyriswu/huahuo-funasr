@@ -12,6 +12,7 @@ run_attempt=${GITHUB_RUN_ATTEMPT:?}
 instance=${FUNASR_NODE01_INSTANCE_ID:?}
 command=${FUNASR_NODE01_PUBLISH_COMMAND_ID:?}
 region=${ACR_REGION:?}
+profile=${FUNASR_BUILD_PROFILE:?}
 registry=huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com
 repository=${ACR_REPOSITORY:-}
 repository_pattern='[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*'
@@ -19,15 +20,17 @@ repository_pattern='[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*'
 [[ "$sha" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$run_attempt" =~ ^[0-9]+$ &&
    "$instance" == i-2zeaydxol26pp3dxg1ak && "$command" =~ ^c-[a-zA-Z0-9]+$ &&
    "$region" == cn-beijing && "${ACR_HOST:-$registry}" == "$registry" &&
+   ( "$profile" == a10-2gb || "$profile" == nvidia-modern ) &&
    ( -z "$repository" || "$repository" =~ ^$repository_pattern$ ) ]] ||
     fail 'Invalid Node01 ACR publish configuration'
 : "${ALIBABA_CLOUD_SECURITY_TOKEN:?Temporary Alibaba Cloud credentials are required}"
 
-client_token="funasr-$run_id-$run_attempt"
-# The fixed command reads this tag with its trusted invocation ID.
+client_token="funasr-$run_id-$run_attempt-$profile"
+# The fixed command reads these tags with its trusted invocation ID.
 if ! invoke_id=$(timeout -k 5s 30s aliyun ecs InvokeCommand --region "$region" --RegionId "$region" \
     --InstanceId.1 "$instance" --CommandId "$command" --Username root \
     --Tag.1.Key funasr-source-sha --Tag.1.Value "$sha" \
+    --Tag.2.Key funasr-build-profile --Tag.2.Value "$profile" \
     --ClientToken "$client_token" --RepeatMode Once --Timeout 4500 --retry-count 0 --yes \
     2>/dev/null | jq -er '.InvokeId' 2>/dev/null); then
     fail 'Could not start the fixed Node01 ACR publish command'
@@ -56,11 +59,14 @@ while (( SECONDS < deadline )); do
         case "$(jq -r '.InvocationStatus' <<< "$item")" in
             Pending|Running|Stopping) ;;
             Success)
-                if ! image=$(jq -er '
+                if ! image=$(jq -er --arg profile "$profile" '
+                    def receipt($key):
+                        map(select(startswith($key)))
+                        | select(length == 1) | first | ltrimstr($key);
                     select(.ExitCode == 0 and ((.Dropped // 0) == 0))
-                    | .Output | split("\n")
-                    | map(sub("\r$"; "") | select(startswith("FUNASR_IMAGE=")))
-                    | select(length == 1) | first | ltrimstr("FUNASR_IMAGE=")
+                    | .Output | split("\n") | map(sub("\r$"; ""))
+                    | select(receipt("FUNASR_BUILD_PROFILE=") == $profile)
+                    | receipt("FUNASR_IMAGE=")
                 ' <<< "$item" 2>/dev/null); then
                     fail "Invalid image receipt for Node01 publish invocation $invoke_id"
                 fi

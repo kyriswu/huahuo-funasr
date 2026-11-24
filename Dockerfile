@@ -21,6 +21,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     case "${BUILD_PROFILE}" in \
         standard) torch_version=2.8.0+cu126; torch_index=https://download.pytorch.org/whl/cu126 ;; \
         a10-2gb) torch_version=2.7.1+cu118; torch_index=https://download.pytorch.org/whl/cu118 ;; \
+        nvidia-modern) torch_version=2.8.0+cu128; torch_index=https://download.pytorch.org/whl/cu128 ;; \
         *) echo "Unsupported BUILD_PROFILE: ${BUILD_PROFILE}" >&2; exit 1 ;; \
     esac \
     && python -m pip install pip==25.3 setuptools==80.9.0 wheel==0.45.1 \
@@ -28,12 +29,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         --index-url "${TORCH_INDEX_URL:-${torch_index}}"
 
 FROM torch-dependencies AS dependencies
-COPY requirements.txt constraints.txt constraints-cu118.txt /tmp/
+COPY requirements.txt constraints.txt constraints-cu118.txt constraints-cu128.txt /tmp/
 COPY --from=funasr-source /opt/funasr-src /opt/funasr-src
 RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "${BUILD_PROFILE}" = a10-2gb ]; then \
+    case "${BUILD_PROFILE}" in \
+        a10-2gb) runtime_constraints=/tmp/constraints-cu118.txt ;; \
+        nvidia-modern) runtime_constraints=/tmp/constraints-cu128.txt ;; \
+        *) runtime_constraints= ;; \
+    esac \
+    && if [ -n "${runtime_constraints}" ]; then \
         sed -E '/^(nvidia-|torch==|torchaudio==|triton==)/d' /tmp/constraints.txt > /tmp/constraints-selected.txt \
-        && cat /tmp/constraints-cu118.txt >> /tmp/constraints-selected.txt; \
+        && cat "${runtime_constraints}" >> /tmp/constraints-selected.txt; \
     else \
         cp /tmp/constraints.txt /tmp/constraints-selected.txt; \
     fi \
@@ -57,7 +63,7 @@ import json
 import os
 from pathlib import Path
 
-if os.environ["BUILD_PROFILE"] == "a10-2gb":
+if os.environ["BUILD_PROFILE"] in {"a10-2gb", "nvidia-modern"}:
     lock_path = Path("model-lock.json")
     lock = json.loads(lock_path.read_text())
     lock["models"]["punc"] = json.loads(Path("model-lock-punc-small.json").read_text())
@@ -105,7 +111,9 @@ CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
 
 # Validate the amd64 ASK candidate inside BuildKit, including on an ARM64 build host.
 FROM runtime AS ask-release
+ARG BUILD_PROFILE
 RUN --network=none python - <<'PY'
+import os
 from pathlib import Path
 
 import torch
@@ -113,8 +121,17 @@ import torch
 from app.main import app
 from app.model_files import verify_models
 
-if torch.version.cuda != "11.8" or not any(route.path == "/readyz" for route in app.routes):
-    raise RuntimeError("Unexpected CUDA runtime or missing readiness endpoint")
+profile = os.environ["BUILD_PROFILE"]
+expected_cuda = {"a10-2gb": "11.8", "nvidia-modern": "12.8"}.get(profile)
+if expected_cuda is None or torch.version.cuda != expected_cuda:
+    raise RuntimeError(f"Unexpected CUDA runtime {torch.version.cuda!r} for ASK profile {profile!r}")
+required_arches = {"sm_75", "sm_80", "sm_90"}
+required_arches.update({"sm_86"} if profile == "a10-2gb" else {"sm_100", "sm_120"})
+compiled_arches = set((torch._C._cuda_getArchFlags() or "").split())
+if missing_arches := required_arches - compiled_arches:
+    raise RuntimeError(f"PyTorch for ASK {profile!r} lacks GPU kernels for {sorted(missing_arches)}")
+if not any(route.path == "/readyz" for route in app.routes):
+    raise RuntimeError("Missing readiness endpoint")
 verify_models(Path("/opt/models"), Path("/opt/app/model-lock.json"))
 PY
 

@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Hold the Node01 release slot for both profiles of a main-branch run.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'huahuo-funasr-acr' || format('huahuo-funasr-ci-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 env:
   ACR_REGION: cn-beijing
   ACR_HOST: huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com
@@ -38,24 +43,28 @@ jobs:
         run: |
           docker buildx build --check --platform linux/amd64 .
           docker buildx build --check --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb .
+          docker buildx build --check --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-modern .
 
   publish:
-    name: Build and publish on Node01
+    name: Build and publish on Node01 (${{ matrix.gpu_profile }})
     needs: validate
     if: >-
       github.repository == 'kyriswu/huahuo-funasr' &&
       github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    concurrency:
-      group: huahuo-funasr-acr
-      cancel-in-progress: false
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        gpu_profile: [a10-2gb, nvidia-modern]
     permissions:
       contents: read
       id-token: write
     env:
       FUNASR_NODE01_INSTANCE_ID: i-2zeaydxol26pp3dxg1ak
       FUNASR_NODE01_PUBLISH_COMMAND_ID: c-bj0742lf7bciz28
+      FUNASR_BUILD_PROFILE: ${{ matrix.gpu_profile }}
       ACR_REPOSITORY: huahuo/huahuo-funasr
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,11 +80,11 @@ jobs:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           audience: sts.aliyuncs.com
           role-session-expiration: 5400
-          role-session-name: gha-funasr-${{ github.run_id }}-${{ github.run_attempt }}
+          role-session-name: gha-funasr-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.gpu_profile }}
       - name: Invoke the fixed FunASR publish command
         id: node01
         run: bash .github/scripts/invoke-acr-publish.sh
       - name: Record the published image
         env:
           FUNASR_IMAGE: ${{ steps.node01.outputs.FUNASR_IMAGE }}
-        run: printf '### A10 2 GB candidate\n\n`%s`\n' "$FUNASR_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+        run: printf '### FunASR GPU profile %s\n\n`%s`\n' "$FUNASR_BUILD_PROFILE" "$FUNASR_IMAGE" >> "$GITHUB_STEP_SUMMARY"

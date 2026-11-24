@@ -8,12 +8,13 @@ fail() {
   exit 1
 }
 
-if [[ $# != 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
-  printf '%s\n' 'Usage: publish-acr-from-node01.sh MAIN_COMMIT_SHA' >&2
+if [[ $# != 2 || ! "$1" =~ ^[0-9a-f]{40}$ || ! "$2" =~ ^(a10-2gb|nvidia-modern)$ ]]; then
+  printf '%s\n' 'Usage: publish-acr-from-node01.sh MAIN_COMMIT_SHA a10-2gb|nvidia-modern' >&2
   exit 2
 fi
 
 sha=$1
+profile=$2
 source_url=https://github.com/kyriswu/huahuo-funasr.git
 registry=huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com
 repo_path=${HUAHUO_FUNASR_ACR_REPOSITORY:?Set the authorized ACR namespace/repository on Node01}
@@ -24,7 +25,7 @@ builder=${HUAHUO_FUNASR_BUILDER:-huahuo-funasr}
 # The wrapper can supply private Docker credentials without hiding the host's builder.
 export BUILDX_CONFIG="${BUILDX_CONFIG:-$HOME/.docker/buildx}"
 
-for dependency in git docker flock; do
+for dependency in git docker flock timeout; do
   command -v "$dependency" >/dev/null || fail "$dependency is required"
 done
 
@@ -58,14 +59,22 @@ verify_main_tip() {
 verify_main_tip
 
 # Include the private temporary directory's suffix to avoid reusing an attempt's tag.
-image=$repository:a10-2gb-$sha-${workdir##*.}
-git -C "$workdir" archive --format=tar "$sha" |
-  docker buildx build --builder "$builder" --progress=plain --platform linux/amd64 \
-    --build-arg BUILD_PROFILE=a10-2gb --target ask-release \
-    --label "org.opencontainers.image.revision=$sha" --load --tag "$image" -
+image=$repository:$profile-$sha-${workdir##*.}
+deadline=$((SECONDS + 4350))
+build_image() {
+  local remaining=$((deadline - SECONDS))
+  ((remaining > 0)) || fail 'Node01 build deadline exceeded'
+  git -C "$workdir" archive --format=tar "$sha" |
+    timeout --signal=INT --kill-after=15s "${remaining}s" \
+    docker buildx build --builder "$builder" --progress=plain --platform linux/amd64 \
+      --build-arg "BUILD_PROFILE=$profile" --target ask-release \
+      --label "org.opencontainers.image.revision=$sha" "$@" -
+}
+
+build_image --output type=cacheonly
 
 verify_main_tip
-docker push "$image"
+build_image --push --tag "$image"
 digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$image")
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'ACR did not return a canonical image digest'
 printf 'FUNASR_IMAGE=%s@%s\n' "$repository" "$digest" >&3

@@ -5,14 +5,28 @@
 [GitHub Actions](../.github/workflows/publish-acr.yml)复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。测试通过后，工作流调用 Node01 上的 FunASR 固定云助手命令。Node01 构建 Linux amd64 镜像，使用已有内网仓库凭据推送到 `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`，再返回固定 digest。
 
 - 共享角色需信任 `repo:kyriswu@5120703/huahuo-funasr@1460054211:ref:refs/heads/main`，并允许调用 FunASR 的固定命令及查询其结果。
-- Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
+- Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 和 `funasr-build-profile` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
 - GitHub 运行摘要记录可用于部署的 `FUNASR_IMAGE` digest。
 
 也可以在本机构建同一候选镜像。
 
 ```bash
 docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --load -t funasr-eci:a10-2gb .
+docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-modern --target ask-release --load -t funasr-eci:nvidia-modern .
 ```
+
+## 内网申请服务选择镜像
+
+内网服务按实际申请到的 NVIDIA 卡型、驱动和显存选择发布摘要。两个镜像均为 `linux/amd64`，使用相同的轻量标点模型，运行时设置 `DEVICE=cuda:0`。
+
+| 发布版本 | CUDA | 首批验收机型 |
+| --- | --- | --- |
+| `a10-2gb` | 11.8 | T4、A10、L20 等 Turing、Ampere、Ada 卡型 |
+| `nvidia-modern` | 12.8 | Blackwell 卡型 `G59`、`L20N`、`L20NE`，以及使用兼容驱动的较早 NVIDIA 卡型 |
+
+ACS Pod 用 `alibabacloud.com/gpu-model-series` 和 `alibabacloud.com/gpu-driver-version` 标签声明卡型与驱动，`nvidia.com/gpu: 1` 对应整张 GPU。按现有 BestEffort 策略请求后，先确认 `/readyz` 和一次真实转写。旧的 ECI A10 1/12 示例使用不同的调度字段。 [ACS GPU 标签](https://help.aliyun.com/zh/cs/user-guide/pod-gpu-model-and-driver-version) · [ACS 卡型和规格](https://help.aliyun.com/zh/cs/user-guide/gpu-families-supported-by-acs) · [ACS 驱动表](https://help.aliyun.com/zh/cs/user-guide/list-of-gpu-driver-versions-supported-by-acs/) · [NVIDIA 架构矩阵](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html)
+
+## ECI 2 GB 验证
 
 选择已有的 ASK 验证命名空间和镜像访问权限。复用该命名空间的镜像拉取配置，必要时在 Pod 模板中引用已有的 `imagePullSecrets`。清单从同命名空间的 `huahuo-funasr-ask-smoke` Secret 的 `token` 键读取测试 API token。声纹和任务数据只写入该验证 Pod。
 

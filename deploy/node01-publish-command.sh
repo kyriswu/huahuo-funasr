@@ -33,13 +33,18 @@ unset token credentials
 invocation=$("$aliyun" ecs DescribeInvocations --region "$region" --RegionId "$region" \
   --InstanceId "$node" --InvokeId "$invoke_id" --CommandId "$command_id" \
   --RepeatMode Once --IncludeOutput false --MaxResults 2 --retry-count 0 --yes)
-sha=$(jq -er --arg invoke "$invoke_id" --arg command "$command_id" --arg node "$node" '
+selection=$(jq -er --arg invoke "$invoke_id" --arg command "$command_id" --arg node "$node" '
+  def tag($key):
+    [.Tags.Tag[] | select(.TagKey == $key) | .TagValue]
+    | select(length == 1) | first | strings;
   .Invocations.Invocation | select(length == 1) | first
   | select(.InvokeId == $invoke and .CommandId == $command and .RepeatMode == "Once")
   | select([.InvokeInstances.InvokeInstance[].InstanceId] == [$node])
-  | [.Tags.Tag[] | select(.TagKey == "funasr-source-sha") | .TagValue]
-  | select(length == 1) | first | select(test("^[0-9a-f]{40}$"))
+  | (tag("funasr-source-sha") | select(test("^[0-9a-f]{40}$"))) as $sha
+  | (tag("funasr-build-profile") | select(. == "a10-2gb" or . == "nvidia-modern")) as $profile
+  | [$sha, $profile] | @tsv
 ' <<< "$invocation")
+IFS=$'\t' read -r sha profile <<< "$selection"
 
 auth=$("$aliyun" cr GetAuthorizationToken --region "$region" --InstanceId "$acr_id" --ExpiresInHours 2)
 jq -e '.IsSuccess == true and .ExpireTime > (now * 1000)' <<< "$auth" >/dev/null
@@ -57,4 +62,5 @@ unset auth username
 export BUILDX_CONFIG=/root/.docker/buildx
 export HUAHUO_FUNASR_ACR_REPOSITORY=huahuo/huahuo-funasr
 export HUAHUO_FUNASR_ACR_STATE_DIR=$publish_dir/state
-bash "$publish_dir/publish-acr-from-node01.sh" "$sha"
+bash "$publish_dir/publish-acr-from-node01.sh" "$sha" "$profile"
+printf 'FUNASR_BUILD_PROFILE=%s\n' "$profile"
