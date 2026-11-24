@@ -3,10 +3,15 @@ ARG PYTHON_IMAGE=python:3.11.14-slim-bookworm@sha256:65a93d69fa75478d554f4ad27c8
 ARG BUILD_PROFILE=standard
 
 FROM ${PYTHON_IMAGE} AS base
+ARG DEBIAN_MIRROR
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN if [ -n "${DEBIAN_MIRROR}" ]; then \
+        sed -i "s|^URIs: http://deb\.debian\.org/|URIs: ${DEBIAN_MIRROR%/}/|" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates ffmpeg libsndfile1 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 FROM base AS funasr-source
 COPY scripts/prepare_funasr.py /tmp/prepare_funasr.py
@@ -15,18 +20,33 @@ RUN python /tmp/prepare_funasr.py --output /opt/funasr-src
 FROM base AS torch-dependencies
 ARG BUILD_PROFILE
 ARG TORCH_INDEX_URL
+ARG TORCH_WHEEL_MIRROR
 RUN python -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "${BUILD_PROFILE}" in \
         standard) torch_version=2.8.0+cu126; torch_index=https://download.pytorch.org/whl/cu126 ;; \
-        a10-2gb) torch_version=2.7.1+cu118; torch_index=https://download.pytorch.org/whl/cu118 ;; \
-        nvidia-modern) torch_version=2.8.0+cu128; torch_index=https://download.pytorch.org/whl/cu128 ;; \
+        a10-2gb) \
+            torch_version=2.7.1+cu118; torch_index=https://download.pytorch.org/whl/cu118; \
+            torch_sha=a596d91c747d1fa601724e85b9c8797c8d7c62140aa1acf245773e911254bc45; \
+            torchaudio_sha=76629345b5e095b5b9dd6abbeb1919e50dd8f3c2082d89b54ad5cd7d25158de9 ;; \
+        nvidia-modern) \
+            torch_version=2.8.0+cu128; torch_index=https://download.pytorch.org/whl/cu128; \
+            torch_sha=039b9dcdd6bdbaa10a8a5cd6be22c4cb3e3589a341e5f904cbb571ca28f55bed; \
+            torchaudio_sha=f4409df567d0723a7a3a89d32c7552a17e0ff6f137ea26a0d268c665259b2995 ;; \
         *) echo "Unsupported BUILD_PROFILE: ${BUILD_PROFILE}" >&2; exit 1 ;; \
     esac \
     && python -m pip install pip==25.3 setuptools==80.9.0 wheel==0.45.1 \
-    && python -m pip install "torch==${torch_version}" "torchaudio==${torch_version}" \
-        --index-url "${TORCH_INDEX_URL:-${torch_index}}"
+    && if [ -n "${TORCH_WHEEL_MIRROR}" ] && [ "${BUILD_PROFILE}" != standard ]; then \
+        wheel_dir="${TORCH_WHEEL_MIRROR%/}/${torch_version##*+}"; \
+        wheel_suffix="${torch_version%+*}%2B${torch_version##*+}-cp311-cp311-manylinux_2_28_x86_64.whl"; \
+        python -m pip install --no-deps \
+            "${wheel_dir}/torch-${wheel_suffix}#sha256=${torch_sha}" \
+            "${wheel_dir}/torchaudio-${wheel_suffix}#sha256=${torchaudio_sha}"; \
+    else \
+        python -m pip install "torch==${torch_version}" "torchaudio==${torch_version}" \
+            --index-url "${TORCH_INDEX_URL:-${torch_index}}"; \
+    fi
 
 FROM torch-dependencies AS dependencies
 COPY requirements.txt constraints.txt constraints-cu118.txt constraints-cu128.txt /tmp/

@@ -58,15 +58,19 @@ verify_main_tip() {
 }
 verify_main_tip
 
+node_build_args=(
+  --build-arg DEBIAN_MIRROR=http://mirrors.cloud.aliyuncs.com
+  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+  --build-arg TORCH_WHEEL_MIRROR=http://mirrors.cloud.aliyuncs.com/pytorch-wheels
+)
 # Use the verified amd64 base cached on Node01 when it matches this commit's Python pin.
 python_pin=$(git -C "$workdir" show "$sha:Dockerfile" |
   sed -nE 's/^ARG PYTHON_IMAGE=.*@sha256:([0-9a-f]{64})$/\1/p')
-base_args=()
 python_layout=$state_dir/python-oci/$python_pin
 if [[ -n "$python_pin" && -r "$python_layout/amd64-digest" ]]; then
   python_digest=$(<"$python_layout/amd64-digest")
   [[ "$python_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'invalid cached amd64 Python digest'
-  base_args=(--build-arg PYTHON_IMAGE=funasr-python
+  node_build_args+=(--build-arg PYTHON_IMAGE=funasr-python
     --build-context "funasr-python=oci-layout://$python_layout@$python_digest")
 fi
 
@@ -80,7 +84,7 @@ build_image() {
     timeout --signal=INT --kill-after=15s "${remaining}s" \
     docker buildx build --builder "$builder" --progress=plain --platform linux/amd64 \
       --build-arg "BUILD_PROFILE=$profile" --target ask-release \
-      --label "org.opencontainers.image.revision=$sha" "${base_args[@]}" "$@" -
+      --label "org.opencontainers.image.revision=$sha" "${node_build_args[@]}" "$@" -
 }
 
 build_image --output type=cacheonly
