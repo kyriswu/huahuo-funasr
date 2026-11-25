@@ -4,6 +4,10 @@ from pathlib import Path
 import re
 
 
+MAX_TRANSCRIPTION_SECONDS = 6 * 60 * 60
+DEFAULT_MAX_UPLOAD_MB = 1024
+
+
 @dataclass(frozen=True)
 class Settings:
     model_root: Path = Path("/opt/models")
@@ -12,8 +16,8 @@ class Settings:
     device: str = "cuda:0"
     api_token: str = ""
     cpu_threads: int = 4
-    max_upload_mb: int = 256
-    max_audio_seconds: int = 7200
+    max_upload_mb: int = DEFAULT_MAX_UPLOAD_MB
+    max_audio_seconds: int = MAX_TRANSCRIPTION_SECONDS
     max_voiceprint_seconds: int = 120
     min_voice_seconds: float = 3.0
     decode_timeout_seconds: int = 120
@@ -45,6 +49,8 @@ class Settings:
         ):
             if getattr(self, field) < 1:
                 raise ValueError(f"{field} must be positive")
+        if self.max_audio_seconds > MAX_TRANSCRIPTION_SECONDS:
+            raise ValueError(f"MAX_AUDIO_SECONDS must be at most {MAX_TRANSCRIPTION_SECONDS}")
         if not -1 <= self.voiceprint_threshold <= 1:
             raise ValueError("VOICEPRINT_THRESHOLD must be in [-1, 1]")
         if not 0 < self.min_voice_seconds <= self.max_voiceprint_seconds:
@@ -64,8 +70,8 @@ class Settings:
             device=os.getenv("DEVICE", "cuda:0"),
             api_token=os.getenv("API_TOKEN", ""),
             cpu_threads=int(os.getenv("CPU_THREADS", "4")),
-            max_upload_mb=int(os.getenv("MAX_UPLOAD_MB", "256")),
-            max_audio_seconds=int(os.getenv("MAX_AUDIO_SECONDS", "7200")),
+            max_upload_mb=int(os.getenv("MAX_UPLOAD_MB", str(DEFAULT_MAX_UPLOAD_MB))),
+            max_audio_seconds=int(os.getenv("MAX_AUDIO_SECONDS", str(MAX_TRANSCRIPTION_SECONDS))),
             max_voiceprint_seconds=int(os.getenv("MAX_VOICEPRINT_SECONDS", "120")),
             min_voice_seconds=float(os.getenv("MIN_VOICE_SECONDS", "3")),
             decode_timeout_seconds=int(os.getenv("DECODE_TIMEOUT_SECONDS", "120")),

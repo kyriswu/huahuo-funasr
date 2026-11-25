@@ -7,6 +7,7 @@ import pytest
 
 from app.main import create_app
 from app.settings import Settings
+from conftest import wav_bytes
 from test_api import FakeEngine
 
 
@@ -40,7 +41,8 @@ def test_status_result_ack_and_audio_lifecycle(tmp_path, audio_bytes):
         task_id = submit(client, audio_bytes, speaker_count=2)
         assert engine.entered.wait(5)
         try:
-            assert list(manager.root.iterdir()), "Input must remain until inference finishes"
+            staged = manager._tasks[task_id].audio
+            assert not staged.closed, "Input must remain until inference finishes"
             status = client.get(f"/v1/tasks/{task_id}").json()
             assert status["status"] == "running" and "result" not in status
             assert client.get(f"/v1/tasks/{task_id}/result").status_code == 409
@@ -51,7 +53,7 @@ def test_status_result_ack_and_audio_lifecycle(tmp_path, audio_bytes):
         finally:
             engine.unblock.set()
         wait_status(client, task_id)
-        assert not list(manager.root.iterdir()), "Audio must be deleted without waiting for a delivery ACK"
+        assert staged.closed and manager._tasks[task_id].audio is None
         first = client.get(f"/v1/tasks/{task_id}/result")
         second = client.get(f"/v1/tasks/{task_id}/result")
         assert first.status_code == 200 and first.content == second.content
@@ -92,8 +94,19 @@ def test_failed_audio_can_be_delivered_and_acknowledged(tmp_path):
         event = client.get(f"/v1/tasks/{task_id}/result").json()
         assert event["event"] == "task.failed" and event["result"] is None
         assert event["error"]["code"] == "invalid_audio"
-        assert not list(client.app.state.tasks.root.iterdir())
+        assert client.app.state.tasks.capacity_usage()[1] == 0
         assert acknowledge(client, task_id, event).status_code == 200
+
+
+def test_async_duration_limit_accepts_boundary_and_reports_overlong_audio(tmp_path):
+    with TestClient(create_app(Settings(data_dir=tmp_path, max_audio_seconds=1), FakeEngine)) as client:
+        accepted = submit(client, wav_bytes(seconds=1))
+        assert wait_status(client, accepted)["status"] == "succeeded"
+        overlong = submit(client, wav_bytes(seconds=2))
+        assert wait_status(client, overlong)["status"] == "failed"
+        event = client.get(f"/v1/tasks/{overlong}/result").json()
+        assert event["error"]["code"] == "audio_too_large"
+        assert client.app.state.engine.counts == [None]
 
 
 def test_callbacks_retry_same_event_and_automatically_consume(tmp_path, audio_bytes):
@@ -174,7 +187,7 @@ def test_idempotency_handles_full_capacity_conflicts_and_consumed_tasks(tmp_path
         consumed = client.post("/v1/tasks", files={"file": ("a.wav", audio_bytes)}, headers=headers)
         assert consumed.json()["consumed_by"] == "ack"
         assert client.app.state.engine.counts == [None]
-        assert not list(client.app.state.tasks.root.iterdir())
+        assert client.app.state.tasks.capacity_usage()[1] == 0
 
 
 def test_audio_capacity_and_upload_limit_release_reservations(tmp_path, audio_bytes):
@@ -183,7 +196,6 @@ def test_audio_capacity_and_upload_limit_release_reservations(tmp_path, audio_by
         rejected = client.post("/v1/tasks", files={"file": ("large.wav", b"x" * (1024 * 1024 + 1))})
         assert rejected.status_code == 429
         assert client.app.state.tasks._active == 0 and client.app.state.tasks._audio_bytes == 0
-        assert not list(client.app.state.tasks.root.iterdir())
         assert client.post("/v1/tasks", files={"file": ("empty.wav", b"")}).status_code == 422
         assert submit(client, audio_bytes)
 
@@ -207,16 +219,30 @@ def test_oversized_result_becomes_bounded_failed_event(tmp_path, audio_bytes):
         acknowledge(client, task_id, result.json())
 
 
-def test_tasks_and_temporary_audio_are_not_restored(tmp_path, audio_bytes):
+def test_tasks_are_not_restored(tmp_path, audio_bytes):
     settings = Settings(data_dir=tmp_path)
     with TestClient(create_app(settings, FakeEngine)) as client:
         task_id = submit(client, audio_bytes)
         wait_status(client, task_id)
-        root = client.app.state.tasks.root
-    assert not root.exists()
     with TestClient(create_app(settings, FakeEngine)) as restarted:
         assert restarted.get(f"/v1/tasks/{task_id}").status_code == 404
         assert restarted.get(f"/v1/tasks/{task_id}/result").status_code == 404
+
+
+def test_shutdown_closes_queued_audio_while_inference_is_busy(tmp_path, audio_bytes):
+    app = create_app(Settings(data_dir=tmp_path), FakeEngine)
+    try:
+        with TestClient(app) as client:
+            manager = app.state.tasks
+            manager.inference_lock.acquire()
+            task_id = submit(client, audio_bytes)
+            assert client.get(f"/v1/tasks/{task_id}").json()["status"] == "queued"
+            staged = manager._tasks[task_id].audio
+            assert not staged.closed
+        assert staged.closed and manager.capacity_usage()[1] == 0
+    finally:
+        if app.state.inference_lock.locked():
+            app.state.inference_lock.release()
 
 
 def test_consumed_history_is_bounded_without_expiring_pending_results(tmp_path, audio_bytes):

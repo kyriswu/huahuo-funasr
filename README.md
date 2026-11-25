@@ -17,7 +17,6 @@ docker build --platform linux/amd64 -t funasr-eci:gpu .
 export API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 docker run -d --name funasr-gpu --gpus all \
   -p 127.0.0.1:8000:8000 \
-  --tmpfs /tmp:rw,nosuid,nodev,size=2g,mode=1777 \
   -e API_TOKEN -e DEVICE=cuda:0 \
   --mount type=volume,src=funasr-voiceprints,dst=/data \
   funasr-eci:gpu
@@ -31,7 +30,7 @@ OpenAPI 文档：`http://127.0.0.1:8000/docs`，点击 **Authorize** 填入 toke
 
 ## 异步转写、回调与 ACK
 
-长录音建议调用 `POST /v1/tasks`，上传完成后返回 202 和 `task_id`。状态与结果接口分开：
+新接入使用 `POST /v1/tasks`，音频上传并暂存后返回 `202` 和 `task_id`。旧同步接口 `POST /v1/transcriptions` 已弃用，保留供现有调用方兼容。单份转写音频默认最多六小时（`21600` 秒），可用 `MAX_AUDIO_SECONDS` 设置更短上限。上传文件默认最多 1024 MiB。
 
 | 接口 | 作用 |
 | --- | --- |
@@ -42,7 +41,9 @@ OpenAPI 文档：`http://127.0.0.1:8000/docs`，点击 **Authorize** 填入 toke
 
 回调直接 POST 完整事件。下游保存结果并按固定 `event_id` 去重后返回 2xx，服务端自动清理，无需另发 ACK。主动获取结果时，业务保存成功后再 ACK。两条确认路径均幂等；已消费取结果返回 410，未完成返回 409，未知或重启前任务返回 404。
 
-原始音频在解析结束后立即删除。未消费结果不设自动过期，包括回调重试耗尽的结果；排队、运行和待领取均计入容量，满额返回 429。任务和结果只存在当前进程及 tmpfs，重启后不恢复；声纹注册数据继续保存在 `/data/voiceprints`。已消费的简要状态默认保留一小时，最多 1024 条。
+部署示例将上传音频和解码 PCM 暂存在容器的 `/tmp` 磁盘上，处理结束后清理。未消费结果留在当前进程内，包括回调重试耗尽的结果。服务解析完上传表单后开始计入任务容量，满额返回 `429`。已消费的简要状态默认保留一小时，最多 1024 条。
+
+查询、取结果和 ACK 需访问接收任务的实例。服务重启后需要重新提交尚未完成交付的任务。业务端应保留原始音频，直到结果已持久化并确认消费。声纹注册数据继续保存在 `/data/voiceprints`。
 
 回调需配置 `CALLBACK_ALLOWED_ORIGINS`（例如 `https://business.example.com,http://10.0.0.8:8080`）和独立 `CALLBACK_SECRET`。来源匹配 scheme、host、port，禁止重定向。HMAC 验签、重试规则和 curl 示例见 [部署教程](docs/ecs-a10-async.md)。
 
@@ -51,12 +52,12 @@ OpenAPI 文档：`http://127.0.0.1:8000/docs`，点击 **Authorize** 填入 toke
 转写并自动估计说话人数：
 
 ```bash
-curl --fail-with-body http://127.0.0.1:8000/v1/transcriptions \
+curl --fail-with-body http://127.0.0.1:8000/v1/tasks \
   -H "Authorization: Bearer $API_TOKEN" \
   -F file=@meeting.mp3
 ```
 
-已知人数可增加 `-F speaker_count=2`。返回 `text`、`timestamps_ms`、`segments` 和 `speakers`，所有音频位置均为**毫秒**；`duration_seconds` 与 `processing_seconds` 为秒。
+已知人数可增加 `-F speaker_count=2`。根据返回的 `task_id` 查询状态，完成后从结果接口读取事件，或通过提交时指定的 `callback_url` 接收事件。事件的 `result` 包含 `text`、`timestamps_ms`、`segments` 和 `speakers`。音频位置以毫秒计，`duration_seconds` 和 `processing_seconds` 以秒计。 [查询与 ACK 示例](docs/ecs-a10-async.md#查询兜底与-ack)
 
 注册声纹，建议使用 10–30 秒干净的单人音频。至少需要 3 秒被 VAD 检出的有效语音：
 
@@ -89,12 +90,12 @@ curl --fail-with-body http://127.0.0.1:8000/v1/voiceprints/verify \
 同时转写、分人并识别姓名：
 
 ```bash
-curl --fail-with-body http://127.0.0.1:8000/v1/transcriptions \
+curl --fail-with-body http://127.0.0.1:8000/v1/tasks \
   -H "Authorization: Bearer $API_TOKEN" \
   -F file=@meeting.wav -F identify_speakers=true -F threshold=0.5
 ```
 
-在 `speakers[].voiceprint` 中读取身份结果，与 `segments[].speaker_id` 关联。声纹相似度为 **[-1, 1] 的原始余弦分数，不是概率**。默认 0.5 是起始参数，应使用业务中的同人/异人录音校准。短音频、噪声、重叠说话会影响聚类和身份匹配。
+在事件的 `result.speakers[].voiceprint` 中读取身份结果，与 `result.segments[].speaker_id` 关联。声纹相似度为 **[-1, 1] 的原始余弦分数，不是概率**。默认 0.5 是起始参数，应使用业务中的同人/异人录音校准。短音频、噪声、重叠说话会影响聚类和身份匹配。
 
 管理声纹：
 
@@ -135,11 +136,13 @@ sudo chown 10001:10001 /mnt/nas/funasr
 
 ## 发布到 ACR 并用于 ECI
 
-当前异步/回调/ACK 版已发布到北京 ACR 的 `ai_service/funasr-eci:gpu-async-ack-20261114` 和 `:gpu`，两个标签对应同一已验收镜像，见 [新版 ACR 发布记录](docs/release-acr-20261114.md)。原 `gpu-20261112` 初版仍可按其固定 digest 使用，见 [初版发布记录](docs/release-acr-20261112.md)。重新发布时使用与部署环境同地域、可从 VPC 访问的 ACR 仓库：
+当前发布流程把两种 GPU 镜像推送到北京内网 ACR，部署时从工作流摘要获取对应镜像摘要。早期固定摘要和验收结果见历史发布记录。 [当前发布流程](docs/ask.md#镜像发布) · [2026-11-14 异步版](docs/release-acr-20261114.md) · [2026-11-12 初版](docs/release-acr-20261112.md)
+
+手动发布时，使用部署环境可通过 VPC 访问的同地域 ACR 仓库和新的标签。
 
 ```bash
 export ACR_REGISTRY=huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com
-export ACR_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci:gpu-async-ack-20261114"
+export ACR_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci:替换为发布标签"
 docker login "$ACR_REGISTRY"
 docker tag funasr-eci:gpu "$ACR_IMAGE"
 docker push "$ACR_IMAGE"
@@ -147,7 +150,7 @@ docker push "$ACR_IMAGE"
 
 部署时优先使用推送后得到的 `仓库@sha256:...` digest。ECI 需要拉取镜像所需的 ACR 访问能力，**语音服务本身无需公网**；NAS 同样需要 VPC 内可达。
 
-下方 ECI/ACK 配置保留初版固定 digest。当前 A10 ECS Docker 部署使用 [新版教程](docs/ecs-a10-async.md)，包含临时 tmpfs 和回调配置。
+下方 ECI/ACK 配置使用初版的固定摘要。包含六小时转写上限的版本请使用对应的镜像摘要。 [A10 ECS 异步部署](docs/ecs-a10-async.md)
 
 直接创建 ECI 的请求生成器（不会创建云资源）：
 
@@ -175,11 +178,11 @@ python3 -m venv .venv-deploy
 .venv-deploy/bin/python scripts/create_eci.py artifacts/eci-request.json --apply
 ```
 
-在 ACK / ACK Serverless 中使用 ECI 虚拟节点时，参见 [deploy/ack-eci-pod.yaml](deploy/ack-eci-pod.yaml)。镜像已填写本次发布的固定 digest，配置 NAS PVC 和 Secret 后即可使用。示例仅提供 ClusterIP 服务，通过 VPC 内网或你的网关访问 8000 端口。
+ACK / ACK Serverless 的 ECI 虚拟节点示例使用历史镜像摘要。部署当前版本时填写对应摘要，并配置 NAS PVC 和 Secret。示例以 ClusterIP 提供服务，可经 VPC 内网或网关访问 8000 端口。 [ECI Pod 清单](deploy/ack-eci-pod.yaml)
 
 A10 1/12 的候选镜像发布、按需启停和 Prometheus 验收见 [ASK GPU 验证](docs/ask.md)。
 
-镜像内的 Docker HEALTHCHECK 主要用于本机；ECI/ACK 请使用示例中显式配置的 `/healthz` 和 `/readyz`。首次启动给模型校验/加载预留时间。长录音为同步请求，客户端和前置网关需配置足够的读取超时。
+镜像内的 Docker HEALTHCHECK 主要用于本机。ECI/ACK 使用示例中的 `/healthz` 和 `/readyz`。首次启动给模型校验和加载预留时间，长音频提交需要客户端与网关允许相应的请求体大小和上传耗时。
 
 ## 参数
 
@@ -193,14 +196,14 @@ A10 1/12 的候选镜像发布、按需启停和 Prometheus 验收见 [ASK GPU �
 | `BATCH_SIZE_S` | `120` | ASR 动态组批总音频秒数，显存不足时减小 |
 | `MAX_SPEAKERS` | `15` | 自动聚类人数上限，显式 `speaker_count` 优先 |
 | `VOICEPRINT_THRESHOLD` | `0.5` | 默认原始余弦匹配阈值 |
-| `MAX_UPLOAD_MB` | `256` | 每个音频文件大小上限 |
-| `MAX_AUDIO_SECONDS` | `7200` | 转写音频最长秒数，超限拒绝 |
+| `MAX_UPLOAD_MB` | `1024` | 每份上传音频的大小上限，单位 MiB |
+| `MAX_AUDIO_SECONDS` | `21600` | 转写音频最长秒数，可设为更低的正整数 |
 | `MAX_VOICEPRINT_SECONDS` | `120` | 每条注册/识别/核验音频最长秒数 |
 | `MIN_VOICE_SECONDS` | `3` | 声纹所需最少有效语音秒数 |
-| `DECODE_TIMEOUT_SECONDS` | `120` | FFmpeg 单次解码超时 |
+| `DECODE_TIMEOUT_SECONDS` | `120` | FFmpeg 单次解码超时，单位秒，可按部署调整 |
 | `MAX_PENDING_TASKS` | `16` | 上传中、排队、运行及未消费任务总上限 |
-| `MAX_TASK_AUDIO_MB` | `1024` | 全部任务暂存原始音频总大小上限 |
-| `MAX_TASK_RESULT_MB` | `16` | 单任务事件大小上限，超限生成小型失败事件 |
+| `MAX_TASK_AUDIO_MB` | `1024` | 全部任务暂存上传音频的总大小上限，单位 MiB |
+| `MAX_TASK_RESULT_MB` | `16` | 单任务事件大小上限，单位 MiB，超限生成小型失败事件 |
 | `TASK_STATUS_TTL_SECONDS` | `3600` | 仅已消费简要状态的保留时间，未消费不适用 |
 | `TASK_HISTORY_LIMIT` | `1024` | 已消费简要状态最大条数 |
 | `CALLBACK_ALLOWED_ORIGINS` | 空 | 允许的回调来源，逗号分隔；配置后才允许回调 |

@@ -55,6 +55,20 @@ def test_probe_and_enrollment_lifecycle(client, audio_bytes):
     assert client.delete("/v1/voiceprints/alice").status_code == 404
 
 
+def test_openapi_prefers_async_transcription(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    assert paths["/v1/transcriptions"]["post"]["deprecated"] is True
+    assert "202" in paths["/v1/tasks"]["post"]["responses"]
+
+
+def test_tasks_enforce_single_file_body_limit_before_parsing(tmp_path):
+    settings = Settings(data_dir=tmp_path, max_upload_mb=1)
+    with TestClient(create_app(settings, FakeEngine)) as client:
+        response = client.post("/v1/tasks", content=b"not multipart",
+                               headers={"Content-Length": str(2 * 1024 * 1024 + 1)})
+        assert response.status_code == 413
+
+
 def test_token_rejected_before_audio_parsing(tmp_path):
     with TestClient(create_app(Settings(data_dir=tmp_path, api_token="a-secret"), FakeEngine)) as client:
         assert client.get("/healthz").status_code == 200

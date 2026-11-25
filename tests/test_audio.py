@@ -1,4 +1,6 @@
 import io
+import subprocess
+import tempfile
 
 import pytest
 
@@ -27,3 +29,23 @@ def test_duration_limit_rejects_instead_of_truncating():
 def test_encoded_size_limit():
     with pytest.raises(AudioTooLarge):
         decode_audio(io.BytesIO(b"0" * (1024 * 1024 + 1)), Settings(max_upload_mb=1), 10)
+
+
+def test_decode_reads_seekable_m4a_without_another_encoded_copy(tmp_path, monkeypatch):
+    audio = tmp_path / "tail-metadata.m4a"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
+        "-t", "2", "-c:a", "aac", str(audio),
+    ], check=True)
+    content = audio.read_bytes()
+    assert content.find(b"moov") > content.find(b"mdat") > 0
+    original_run = subprocess.run
+    with tempfile.TemporaryFile() as staged:
+        staged.write(content)
+
+        def run(*args, **kwargs):
+            assert kwargs["stdin"] is staged
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        assert abs(decode_audio(staged, Settings(), 3).duration_seconds - 2) < 0.1

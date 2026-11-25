@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
-from pathlib import Path
 import random
 import tempfile
 import threading
@@ -36,10 +35,10 @@ def _timestamp(value: float | None) -> str | None:
 class Task:
     task_id: str
     event_id: str
-    path: Path | None
     options: dict
     callback: CallbackTarget | None
     created: float
+    audio: BinaryIO | None = None
     status: str = "uploading"
     started: float | None = None
     finished: float | None = None
@@ -69,8 +68,6 @@ class TaskManager:
         self._active = 0
         self._audio_bytes = 0
         self._stopping = False
-        self._directory = tempfile.TemporaryDirectory(prefix="funasr-tasks-", dir="/tmp")
-        self.root = Path(self._directory.name)
         self._inference_thread = threading.Thread(target=self._inference_loop, name="funasr-inference", daemon=True)
         self._callback_thread = threading.Thread(target=self._callback_loop, name="funasr-callback", daemon=True)
 
@@ -85,11 +82,13 @@ class TaskManager:
         self._inference_thread.join()
         self._callback_thread.join()
         with self._condition:
+            for task in self._tasks.values():
+                if task.status == "queued":
+                    self._delete_audio(task)
             self._tasks.clear()
             self._keys.clear()
             self._queue.clear()
             self._history.clear()
-        self._directory.cleanup()
 
     def has_pending_inference(self) -> bool:
         with self._condition:
@@ -181,7 +180,7 @@ class TaskManager:
         ):
             raise TaskError(422, "Idempotency-Key must contain 1-128 printable ASCII characters without spaces")
         task_id = "task_" + uuid.uuid4().hex
-        task = Task(task_id, "evt_" + uuid.uuid4().hex, self.root / task_id, options, callback, time.time())
+        task = Task(task_id, "evt_" + uuid.uuid4().hex, options, callback, time.time())
         if callback is not None:
             task.callback_status = "pending"
         with self._condition:
@@ -196,17 +195,19 @@ class TaskManager:
         digest = hashlib.sha256()
         try:
             source.seek(0)
-            with task.path.open("wb") as target:
-                while chunk := source.read(1024 * 1024):
-                    if task.audio_bytes + len(chunk) > self.settings.max_upload_mb * 1024 * 1024:
-                        raise AudioTooLarge("Encoded audio exceeds MAX_UPLOAD_MB")
-                    with self._condition:
-                        if self._audio_bytes + len(chunk) > self.settings.max_task_audio_mb * 1024 * 1024:
-                            raise TaskError(429, "Temporary task audio capacity is full")
-                        self._audio_bytes += len(chunk)
-                        task.audio_bytes += len(chunk)
-                    target.write(chunk)
-                    digest.update(chunk)
+            # An anonymous temporary file is reclaimed when its descriptors close, even on a crash.
+            target = task.audio = tempfile.TemporaryFile(prefix="funasr-task-")
+            while chunk := source.read(1024 * 1024):
+                if task.audio_bytes + len(chunk) > self.settings.max_upload_mb * 1024 * 1024:
+                    raise AudioTooLarge("Encoded audio exceeds MAX_UPLOAD_MB")
+                with self._condition:
+                    if self._audio_bytes + len(chunk) > self.settings.max_task_audio_mb * 1024 * 1024:
+                        raise TaskError(429, "Temporary task audio capacity is full")
+                    self._audio_bytes += len(chunk)
+                    task.audio_bytes += len(chunk)
+                target.write(chunk)
+                digest.update(chunk)
+            target.flush()
             if task.audio_bytes == 0:
                 raise AudioError("Audio upload is empty")
             descriptor = {
@@ -215,6 +216,8 @@ class TaskManager:
             }
             fingerprint = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
             with self._condition:
+                if self._stopping:
+                    raise TaskError(503, "Service is stopping")
                 existing_id = self._keys.get(idempotency_key) if idempotency_key is not None else None
                 if existing_id is not None:
                     existing = self._tasks[existing_id]
@@ -243,9 +246,13 @@ class TaskManager:
                         self._active -= 1
 
     def _delete_audio(self, task: Task):
-        if task.path is not None:
-            task.path.unlink(missing_ok=True)
-            task.path = None
+        if task.audio is not None:
+            try:
+                task.audio.close()
+            except OSError as error:
+                logger.warning("Temporary audio close failed: %s", type(error).__name__)
+            finally:
+                task.audio = None
         with self._condition:
             self._audio_bytes -= task.audio_bytes
             task.audio_bytes = 0
@@ -253,8 +260,9 @@ class TaskManager:
     def _run(self, task: Task) -> tuple[dict | None, dict | None]:
         clip = None
         try:
-            with self.metrics.stage.labels("async", "decode").time(), task.path.open("rb") as source:
-                clip = decode_audio(source, self.settings, self.settings.max_audio_seconds)
+            assert task.audio is not None
+            with self.metrics.stage.labels("async", "decode").time():
+                clip = decode_audio(task.audio, self.settings, self.settings.max_audio_seconds)
             records = self.store.records() if task.options["identify_speakers"] else None
             with self.metrics.stage.labels("async", "inference").time():
                 result = self.engine.transcribe(clip, task.options["speaker_count"], records, task.options["threshold"])

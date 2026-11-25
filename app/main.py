@@ -46,8 +46,9 @@ class RequestGuard:
                     {"detail": "Invalid or missing Bearer token"}, 401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )(scope, receive, send)
-        # Two files for verification plus multipart framing.
-        body_limit = 2 * self.settings.max_upload_mb * 1024 * 1024 + 1024 * 1024
+        # Transcription uploads one file. Voiceprint verification uploads two.
+        files = 1 if scope["path"].rstrip("/") in {"/v1/tasks", "/v1/transcriptions"} else 2
+        body_limit = (files * self.settings.max_upload_mb + 1) * 1024 * 1024
         if b"content-length" in headers:
             try:
                 size = int(headers[b"content-length"])
@@ -184,7 +185,8 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
             raise HTTPException(503, "Models are not ready")
         return {"status": "ready", "device": settings.device}
 
-    @application.post("/v1/transcriptions", dependencies=[Depends(check_token)])
+    @application.post("/v1/transcriptions", dependencies=[Depends(check_token)], deprecated=True,
+                      summary="同步转写（兼容旧调用）")
     def transcribe(
         request: Request,
         file: Annotated[UploadFile, File(description="待转写的完整音频")],
@@ -201,7 +203,8 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
                 return engine.transcribe(clip, speaker_count, records, selected_threshold(threshold))
 
     @application.post("/v1/tasks", dependencies=[Depends(check_token)], status_code=202,
-                      summary="提交内存异步转写任务")
+                      summary="提交异步转写任务",
+                      description="上传完成后返回任务 ID，支持查询状态和结果，也可指定回调地址。")
     def submit_task(
         request: Request,
         file: Annotated[UploadFile, File(description="待转写的完整音频，处理完成后删除")],
