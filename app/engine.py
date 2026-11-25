@@ -7,6 +7,7 @@ import numpy as np
 from app.audio import AudioClip, AudioError, SAMPLE_RATE
 from app.model_files import verify_models
 from app.settings import Settings
+from app.startup import profile_checkpoints, startup_phase
 from app.voiceprints import match_voiceprint, normalize
 
 logger = logging.getLogger(__name__)
@@ -14,33 +15,51 @@ logger = logging.getLogger(__name__)
 
 class SpeechEngine:
     def __init__(self, settings: Settings):
+        startup_seconds = self.startup_seconds = {}
+        self.checkpoint_load_modes = {}
         # Keep GPU imports in initialization so API tests need no model dependencies.
-        import torch
-        from funasr import AutoModel
+        with startup_phase(startup_seconds, "import_torch"):
+            import torch
+        with startup_phase(startup_seconds, "import_funasr"):
+            from funasr import AutoModel
 
         self.settings = settings
         self.torch = torch
         if settings.device.startswith("cuda"):
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA is unavailable. Attach an NVIDIA GPU to ECI; DEVICE=cpu is an explicit diagnostic option.")
-            device = torch.device(settings.device)
-            torch.cuda.set_device(device)
-            # Check kernel execution as well as driver/device visibility.
-            torch.ones(1, device=device).sum().item()
+            with startup_phase(startup_seconds, "init_cuda"):
+                if not torch.cuda.is_available():
+                    raise RuntimeError("CUDA is unavailable. Attach an NVIDIA GPU to ECI; DEVICE=cpu is an explicit diagnostic option.")
+                device = torch.device(settings.device)
+                torch.cuda.set_device(device)
+                # Check kernel execution as well as driver/device visibility.
+                torch.ones(1, device=device).sum().item()
             logger.info("Using GPU: %s; torch=%s CUDA=%s", torch.cuda.get_device_name(device), torch.__version__, torch.version.cuda)
-        self.lock, self.model_id = verify_models(settings.model_root, settings.model_lock)
+        with startup_phase(startup_seconds, "verify_models"):
+            self.lock, self.model_id = verify_models(settings.model_root, settings.model_lock)
         torch.set_num_threads(settings.cpu_threads)
-        self.pipeline = AutoModel(
-            model=str(settings.model_root / "asr"),
-            vad_model=str(settings.model_root / "vad"),
-            punc_model=str(settings.model_root / "punc"),
-            spk_model=str(settings.model_root / "speaker"),
-            vad_kwargs={"max_single_segment_time": 30000},
-            device=settings.device, ncpu=settings.cpu_threads,
-            max_num_spks=settings.max_speakers,
-            spk_mode="punc_segment", disable_update=True,
-            trust_remote_code=False, disable_pbar=True, disable_log=True,
-        )
+        model_paths = {role: str(settings.model_root / role) for role in ("asr", "vad", "punc", "speaker")}
+        roles_by_path = {path: role for role, path in model_paths.items()}
+
+        class ProfiledAutoModel(AutoModel):
+            def build_model(self, **kwargs):
+                role = roles_by_path.get(kwargs.get("model"))
+                if role is None:
+                    return super().build_model(**kwargs)
+                with startup_phase(startup_seconds, f"load_{role}"):
+                    return super().build_model(**kwargs)
+
+        with startup_phase(startup_seconds, "load_models"), profile_checkpoints(
+            settings.model_root, startup_seconds, self.checkpoint_load_modes, settings.model_checkpoint_mmap,
+        ):
+            self.pipeline = ProfiledAutoModel(
+                model=model_paths["asr"], vad_model=model_paths["vad"],
+                punc_model=model_paths["punc"], spk_model=model_paths["speaker"],
+                vad_kwargs={"max_single_segment_time": 30000},
+                device=settings.device, ncpu=settings.cpu_threads,
+                max_num_spks=settings.max_speakers,
+                spk_mode="punc_segment", disable_update=True,
+                trust_remote_code=False, disable_pbar=True, disable_log=True,
+            )
         for name in ("kwargs", "vad_kwargs", "punc_kwargs", "spk_kwargs"):
             actual = getattr(self.pipeline, name)["device"]
             if settings.device.startswith("cuda") and not actual.startswith("cuda"):

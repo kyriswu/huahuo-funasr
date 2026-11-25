@@ -22,6 +22,10 @@ class Metrics:
         ProcessCollector(registry=self.registry)
         self.ready = Gauge("funasr_ready", "Whether FunASR is ready to accept requests.", registry=self.registry)
         self.startup = Gauge("funasr_startup_duration_seconds", "Model and service startup time.", registry=self.registry)
+        self.startup_stage = Gauge(
+            "funasr_startup_stage_duration_seconds", "Wall time of the last startup by stage, including nested stages.",
+            ("stage",), registry=self.registry,
+        )
         self.unconsumed = Gauge("funasr_async_unconsumed_tasks", "Tasks holding a capacity slot.", registry=self.registry)
         self.audio = Gauge("funasr_async_audio_bytes", "Bytes reserved for staged task audio.", registry=self.registry)
         self.completed = Counter("funasr_async_tasks_completed", "Terminal async tasks.", ("outcome",), registry=self.registry)

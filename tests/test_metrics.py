@@ -1,3 +1,5 @@
+import json
+import logging
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -45,3 +47,24 @@ def test_private_metrics_listener_records_job_lifecycle(tmp_path, audio_bytes):
         with pytest.raises(HTTPError) as error:
             urlopen(f"http://127.0.0.1:{port}/v1/tasks", timeout=2)
         assert error.value.code == 404
+
+
+def test_startup_timing_is_logged_and_exposed_on_private_metrics(tmp_path, caplog):
+    class ProfiledEngine(FakeEngine):
+        startup_seconds = {"load_asr": 1.5}
+        checkpoint_load_modes = {"asr": "standard"}
+
+    settings = Settings(data_dir=tmp_path, metrics_port=0, api_token="private")
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    with TestClient(create_app(settings, ProfiledEngine)) as client:
+        assert client.get("/readyz").status_code == 200
+        port = client.app.state.metrics_server.server_port
+        with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=2) as response:
+            metrics = response.read().decode()
+    assert 'funasr_startup_stage_duration_seconds{stage="load_asr"} 1.5' in metrics
+    log, = [json.loads(record.message) for record in caplog.records if '"funasr.startup"' in record.message]
+    assert log["stage_seconds"]["load_asr"] == 1.5
+    assert log["stage_seconds"]["load_voiceprints"] >= 0
+    assert log["checkpoint_load_modes"] == {"asr": "standard"}
+    assert not log["checkpoint_mmap_requested"]
+    assert "private" not in json.dumps(log)

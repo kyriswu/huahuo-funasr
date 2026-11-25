@@ -186,6 +186,8 @@ A10 1/12 的手动构建、按需启停和 Prometheus 验收见 [ASK GPU 验证]
 
 镜像内的 Docker HEALTHCHECK 主要用于本机。ECI/ACK 使用示例中的 `/healthz` 和 `/readyz`。首次启动给模型校验和加载预留时间，长音频提交需要客户端与网关允许相应的请求体大小和上传耗时。
 
+每次成功启动会记录 `funasr.startup` 日志，包括总耗时、各阶段耗时和实际权重读取方式。可用 `MODEL_CHECKPOINT_MMAP` 对照测量内存映射的效果。 [ACS 冷启动对照](docs/ask.md#冷启动对照)
+
 ## 参数
 
 | 环境变量 | 默认值 | 说明 |
@@ -195,6 +197,7 @@ A10 1/12 的手动构建、按需启停和 Prometheus 验收见 [ASK GPU 验证]
 | `DATA_DIR` | `/data` | 声纹目录的父目录 |
 | `CPU_THREADS` | `4` | 推理和聚类 CPU 线程数 |
 | `METRICS_PORT` | 空 | 独立的 Prometheus 抓取端口，ASK 验证使用 `9464` |
+| `MODEL_CHECKPOINT_MMAP` | `0` | `0` 为常规加载，`1` 为实验模式，对兼容 ZIP 格式的 ASR 和标点权重启用内存映射 |
 | `BATCH_SIZE_S` | `120` | ASR 动态组批总音频秒数，显存不足时减小 |
 | `MAX_SPEAKERS` | `15` | 自动聚类人数上限，显式 `speaker_count` 优先 |
 | `VOICEPRINT_THRESHOLD` | `0.5` | 默认原始余弦匹配阈值 |

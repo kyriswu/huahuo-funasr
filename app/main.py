@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager, contextmanager
+import json
 import logging
 import secrets
 import threading
@@ -18,10 +19,12 @@ from app.callbacks import parse_callback_target
 from app.engine import SpeechEngine
 from app.metrics import Metrics
 from app.settings import Settings
+from app.startup import startup_phase
 from app.tasks import TaskError, TaskManager
 from app.voiceprints import StoreError, VoiceprintExists, VoiceprintStore, match_voiceprint, validate_id
 
 logger = logging.getLogger(__name__)
+startup_logger = logging.getLogger("uvicorn.error")
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -86,15 +89,29 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         try:
             engine = await run_in_threadpool(engine_factory, settings)
             application.state.engine = engine
-            application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
-            tasks = application.state.tasks = TaskManager(
-                settings, engine, application.state.store, application.state.inference_lock, metrics, callback_sender,
-            )
-            metrics.attach(tasks, engine, settings.device)
-            tasks.start()
+            stage_seconds = dict(getattr(engine, "startup_seconds", {}))
+            with startup_phase(stage_seconds, "load_voiceprints"):
+                application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
+            with startup_phase(stage_seconds, "start_workers"):
+                tasks = application.state.tasks = TaskManager(
+                    settings, engine, application.state.store, application.state.inference_lock, metrics, callback_sender,
+                )
+                metrics.attach(tasks, engine, settings.device)
+                tasks.start()
+            elapsed = time.monotonic() - started
+            for stage, seconds in stage_seconds.items():
+                metrics.startup_stage.labels(stage).set(seconds)
+            metrics.startup.set(elapsed)
             application.state.ready = True
-            metrics.startup.set(time.monotonic() - started)
             metrics.ready.set(1)
+            startup_logger.info("%s", json.dumps({
+                "event": "funasr.startup",
+                "device": settings.device,
+                "total_seconds": round(elapsed, 6),
+                "stage_seconds": {stage: round(seconds, 6) for stage, seconds in stage_seconds.items()},
+                "checkpoint_mmap_requested": settings.model_checkpoint_mmap,
+                "checkpoint_load_modes": getattr(engine, "checkpoint_load_modes", {}),
+            }))
             try:
                 yield
             finally:

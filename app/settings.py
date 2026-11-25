@@ -35,6 +35,7 @@ class Settings:
     callback_max_attempts: int = 10
     callback_retry_seconds: float = 10.0
     metrics_port: int | None = None
+    model_checkpoint_mmap: bool = False
 
     def __post_init__(self):
         if not re.fullmatch(r"cpu|cuda(?::\d+)?", self.device):
@@ -62,6 +63,9 @@ class Settings:
     @classmethod
     def from_env(cls):
         metrics_port = os.getenv("METRICS_PORT")
+        checkpoint_mmap = os.getenv("MODEL_CHECKPOINT_MMAP", "0")
+        if checkpoint_mmap not in {"0", "1"}:
+            raise ValueError("MODEL_CHECKPOINT_MMAP must be 0 or 1")
         default_batch_size_s = "10" if os.getenv("FUNASR_BUILD_PROFILE") == "a10-2gb" else "120"
         return cls(
             model_root=Path(os.getenv("MODEL_ROOT", "/opt/models")),
@@ -91,4 +95,5 @@ class Settings:
             callback_max_attempts=int(os.getenv("CALLBACK_MAX_ATTEMPTS", "10")),
             callback_retry_seconds=float(os.getenv("CALLBACK_RETRY_SECONDS", "10")),
             metrics_port=int(metrics_port) if metrics_port else None,
+            model_checkpoint_mmap=checkpoint_mmap == "1",
         )

@@ -21,3 +21,15 @@ def test_duration_limit_cannot_exceed_six_hours(monkeypatch):
     monkeypatch.setenv("MAX_AUDIO_SECONDS", "21601")
     with pytest.raises(ValueError, match="MAX_AUDIO_SECONDS.*21600"):
         Settings.from_env()
+
+
+def test_checkpoint_mmap_is_opt_in(monkeypatch):
+    monkeypatch.delenv("MODEL_CHECKPOINT_MMAP", raising=False)
+    assert not Settings.from_env().model_checkpoint_mmap
+    monkeypatch.setenv("MODEL_CHECKPOINT_MMAP", "1")
+    assert Settings.from_env().model_checkpoint_mmap
+    monkeypatch.setenv("MODEL_CHECKPOINT_MMAP", "0")
+    assert not Settings.from_env().model_checkpoint_mmap
+    monkeypatch.setenv("MODEL_CHECKPOINT_MMAP", "2")
+    with pytest.raises(ValueError, match="MODEL_CHECKPOINT_MMAP"):
+        Settings.from_env()
