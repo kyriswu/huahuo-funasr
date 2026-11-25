@@ -29,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
@@ -39,11 +40,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg
           python -m pip install -c constraints.txt -r requirements-test.txt fastapi numpy python-multipart prometheus-client
           python -m pytest -q -p no:cacheprovider tests
+      - name: Verify the pinned GPU runtime can be reused
+        env:
+          BASE_SOURCE: 9287472942a82f34507d1019221ee8cdd3664987
+        run: |
+          git diff --exit-code "$BASE_SOURCE" HEAD -- .dockerignore requirements.txt 'constraints*.txt' 'model-lock*.json' scripts/prepare_funasr.py scripts/download_models.py
+          diff -u <(git show "$BASE_SOURCE:Dockerfile" | sed '/^# Validate the amd64 ASK candidate/,$d') \
+            <(sed -e '/^ARG ASK_MODERN_BASE=/d' -e '/^# Validate the amd64 ASK candidate/,$d' Dockerfile)
+          removed=$(git diff --name-only --no-renames --diff-filter=D "$BASE_SOURCE" HEAD -- app/ scripts/)
+          if [[ -n "$removed" ]]; then
+            printf 'A full GPU runtime rebuild is required to remove files inherited from the base:\n%s\n' "$removed" >&2
+            exit 1
+          fi
       - name: Check Docker profiles
         run: |
-          docker buildx build --check --platform linux/amd64 .
-          docker buildx build --check --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb .
-          docker buildx build --check --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-modern .
+          docker buildx build --check --platform linux/amd64 --target production .
+          docker buildx build --check --platform linux/amd64 --target ask-release --build-arg BUILD_PROFILE=a10-2gb .
+          docker buildx build --check --platform linux/amd64 --target ask-release-full --build-arg BUILD_PROFILE=nvidia-modern .
+          docker buildx build --check --platform linux/amd64 --target ask-release --build-arg BUILD_PROFILE=nvidia-modern --build-arg ASK_MODERN_BASE=scratch .
 
   publish:
     name: Build and publish on Node01 (${{ matrix.gpu_profile }})
@@ -81,63 +95,12 @@ jobs:
           audience: sts.aliyuncs.com
           role-session-expiration: 5400
           role-session-name: gha-funasr-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.gpu_profile }}
-      - name: Read the results of previous Node01 executions
+      - name: Invoke the fixed FunASR publish command
+        id: node01
+        run: bash .github/scripts/invoke-acr-publish.sh
+      - name: Record the published image
         env:
-          FAILED_RUNS: 't-bj0746a1higycjk t-bj0746dipvzzmyo'
+          FUNASR_IMAGE: ${{ steps.node01.outputs.FUNASR_IMAGE }}
         run: |
-          set -euo pipefail
-          for invocation in $FAILED_RUNS; do
-            diagnostic=$(timeout 30s aliyun ecs DescribeInvocationResults --region "$ACR_REGION" --RegionId "$ACR_REGION" \
-              --CommandId "$FUNASR_NODE01_PUBLISH_COMMAND_ID" --InstanceId "$FUNASR_NODE01_INSTANCE_ID" \
-              --InvokeId "$invocation" --ContentEncoding PlainText --MaxResults 1 --retry-count 0 --yes |
-              jq -ce --arg id "$invocation" --arg instance "$FUNASR_NODE01_INSTANCE_ID" --arg command "$FUNASR_NODE01_PUBLISH_COMMAND_ID" '
-                .Invocation.InvocationResults.InvocationResult
-                | map(select(.InvokeId == $id and .InstanceId == $instance and .CommandId == $command))
-                | select(length == 1) | first
-                | ((.Output // "") + "\n" + (.ErrorInfo // "")) as $log
-                | {
-                    invocation: $id,
-                    status: (.InvocationStatus | select(test("^[A-Za-z]+$"))),
-                    exit_code: (.ExitCode | if type == "number" then . else null end),
-                    dropped: (.Dropped // 0 | numbers),
-                    output_length: ($log | length),
-                    signals: [
-                      {name: "disk_full", pattern: "no space left|ENOSPC|disk quota exceeded"},
-                      {name: "out_of_memory", pattern: "out of memory|cannot allocate memory|killed|exit code: 137"},
-                      {name: "registry_auth", pattern: "unauthorized|authorization failed|insufficient.scope|401 unauthorized|403 forbidden"},
-                      {name: "network_timeout", pattern: "timed out|timeout|connection reset|unexpected EOF|TLS handshake"},
-                      {name: "network_dns", pattern: "no such host|temporary failure in name resolution|could not resolve|name or service not known"},
-                      {name: "dependency_install", pattern: "could not install|pip install|no matching distribution|no versions found"},
-                      {name: "model_download", pattern: "download_models[.]py|modelscope|weights|checksum"},
-                      {name: "model_check", pattern: "verify_models|unexpected inference defaults|lacks GPU kernels|unexpected CUDA runtime|Traceback"},
-                      {name: "image_export", pattern: "exporting layers|pushing layers|pushing manifest|exporter"},
-                      {name: "manifest_read", pattern: "manifest unknown|canonical image digest|imagetools"},
-                      {name: "source_tip_moved", pattern: "no longer the tip|could not verify FunASR main"},
-                      {name: "builder_lock", pattern: "another FunASR release is running"},
-                      {name: "command_timeout", pattern: "deadline exceeded|Terminated"},
-                      {name: "emulation_failure", pattern: "exec format error|Illegal instruction|qemu|segmentation fault"},
-                      {name: "registry_token", pattern: "GetAuthorizationToken|security.credentials|docker login"},
-                      {name: "download_retry", pattern: "retrying|Failed to resume|incomplete download"}
-                    ] | map(select(.pattern as $pattern | $log | test($pattern; "i")) | .name)
-                  }')
-            printf '::notice::Node01 diagnostic %s\n' "$diagnostic"
-          done
-      - name: Read the verified runtime image from the previous release
-        run: |
-          set -euo pipefail
-          source=9287472942a82f34507d1019221ee8cdd3664987
-          image=$(timeout 30s aliyun ecs DescribeInvocationResults --region "$ACR_REGION" --RegionId "$ACR_REGION" \
-            --CommandId "$FUNASR_NODE01_PUBLISH_COMMAND_ID" --InstanceId "$FUNASR_NODE01_INSTANCE_ID" \
-            --Tag.1.Key funasr-source-sha --Tag.1.Value "$source" \
-            --Tag.2.Key funasr-build-profile --Tag.2.Value "$FUNASR_BUILD_PROFILE" \
-            --ContentEncoding PlainText --MaxResults 10 --retry-count 0 --yes |
-            jq -er --arg profile "$FUNASR_BUILD_PROFILE" --arg host "$ACR_HOST" --arg repo "$ACR_REPOSITORY" '
-              [.Invocation.InvocationResults.InvocationResult[]
-               | select(.InvocationStatus=="Success" and .ExitCode==0 and ((.Dropped // 0)==0))
-               | (.Output // "" | split("\n") | map(sub("\r$"; ""))) as $lines
-               | select($lines | index("FUNASR_BUILD_PROFILE="+$profile))
-               | $lines[] | select(startswith("FUNASR_IMAGE="+$host+"/"+$repo+"@sha256:"))
-               | sub("^FUNASR_IMAGE="; "")
-               | select(test("^[a-z0-9./-]+@sha256:[a-f0-9]{64}$"))]
-              | unique | select(length==1) | first')
-          printf '::notice::Verified baseline %s %s\n' "$source" "$image"
+          printf '::notice::Published %s %s\n' "$FUNASR_BUILD_PROFILE" "$FUNASR_IMAGE"
+          printf '### FunASR GPU profile %s\n\n`%s`\n' "$FUNASR_BUILD_PROFILE" "$FUNASR_IMAGE" >> "$GITHUB_STEP_SUMMARY"

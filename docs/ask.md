@@ -7,7 +7,8 @@
 - 共享角色需信任 `repo:kyriswu@5120703/huahuo-funasr@1460054211:ref:refs/heads/main`，并允许调用 FunASR 的固定命令及查询其结果。
 - Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 和 `funasr-build-profile` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
 - GitHub Actions 运行摘要记录可用于部署的 `FUNASR_IMAGE` 固定摘要。CI 继续检查 `a10-2gb` 配置，该版本按需手动构建。
-- Node01 使用阿里云镜像站下载构建依赖，并核验 PyTorch 和 TorchAudio wheel 的上游 SHA256。构建时可以复用匹配的 Python OCI 缓存及通过原始 SHA256 校验的 FunASR 源码包。
+- 自动发布按镜像摘要复用提交 `9287472` 的已验证运行时，通过 `COPY --link` 追加应用和脚本。CI 核对运行时输入和继承的文件。变更运行时输入或删除继承的应用、脚本文件时，需要完整重建并更新运行时基线。
+- Node01 完整构建使用阿里云镜像站下载构建依赖，并核验 PyTorch 和 TorchAudio wheel 的上游 SHA256。构建时可以复用匹配的 Python OCI 缓存及通过原始 SHA256 校验的 FunASR 源码包。
 - 在同一个 BuildKit 构建器上，两种配置共用模型缓存。下载中断后可以续传，权重的大小及 SHA256 匹配模型清单后才会写入镜像。
 
 | 构建配置 | CUDA | 模型与用途 |
@@ -17,11 +18,11 @@
 
 两版均以 `DEVICE=cuda:0` 运行，ASR、VAD、标点和声纹模型都在 GPU 上。CUDA 不可用时启动报错，推理显存耗尽时返回任务错误。
 
-以下命令可手动构建任一配置。A10 1/12 使用 `a10-2gb`。
+以下命令可分别完整构建两种镜像。A10 1/12 使用 `a10-2gb`。
 
 ```bash
 docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --target ask-release --load -t funasr-eci:a10-2gb .
-docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-modern --target ask-release --load -t funasr-eci:nvidia-modern .
+docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-modern --target ask-release-full --load -t funasr-eci:nvidia-modern .
 ```
 
 ## 内网服务申请 ACS NVIDIA GPU

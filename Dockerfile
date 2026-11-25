@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 ARG PYTHON_IMAGE=python:3.11.14-slim-bookworm@sha256:65a93d69fa75478d554f4ad27c85c1e69fa184956261b4301ebaf6dbb0a3543d
 ARG BUILD_PROFILE=standard
+ARG ASK_MODERN_BASE=huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com/huahuo/huahuo-funasr@sha256:cbdfcf5ec862a4857d9852a22ba7fa805292170a060cbefde6c4a837443f9d2c
 
 FROM ${PYTHON_IMAGE} AS base
 ARG DEBIAN_MIRROR
@@ -137,7 +138,7 @@ USER 10001:10001
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
 
 # Validate the amd64 ASK candidate inside BuildKit, including on an ARM64 build host.
-FROM runtime AS ask-release
+FROM runtime AS ask-release-full
 ARG BUILD_PROFILE
 RUN --network=none python - <<'PY'
 import os
@@ -166,6 +167,17 @@ if not any(route.path == "/readyz" for route in app.routes):
     raise RuntimeError("Missing readiness endpoint")
 verify_models(Path("/opt/models"), Path("/opt/app/model-lock.json"))
 PY
+
+FROM ask-release-full AS ask-profile-standard
+FROM ask-release-full AS ask-profile-a10-2gb
+
+# The verified runtime from 9287472 supplies all dependencies and model files.
+# Linked copies let BuildKit append the application layers without unpacking the base.
+FROM ${ASK_MODERN_BASE} AS ask-profile-nvidia-modern
+COPY --link --chown=10001:10001 app/ /opt/app/app/
+COPY --link --chown=10001:10001 scripts/ /opt/app/scripts/
+
+FROM ask-profile-${BUILD_PROFILE} AS ask-release
 
 # Keep the production image as the default build target.
 FROM runtime AS production

@@ -8,7 +8,7 @@
 
 ## 构建与启动
 
-构建需要公网下载 Python 依赖和约 2.2 GB 模型文件，构建机不需要 GPU。运行需要 NVIDIA GPU 和容器 GPU 支持。默认目标 T4 16 GB，建议容器至少 4 vCPU、12 GiB 内存，并根据长录音压测调整。CUDA 12.6 建议搭配 560 系列或更新的 NVIDIA 驱动。
+完整构建需下载 Python 依赖和约 2.2 GB 模型文件，构建机不需要 GPU。运行需要 NVIDIA GPU 和容器 GPU 支持。默认目标 T4 16 GB，建议容器至少 4 vCPU、12 GiB 内存，并根据长录音压测调整。CUDA 12.6 建议搭配 560 系列或更新的 NVIDIA 驱动。
 
 ```bash
 cd /root/funasr-eci
@@ -138,6 +138,8 @@ sudo chown 10001:10001 /mnt/nas/funasr
 
 主分支自动发布只构建并推送 `nvidia-modern` 到北京内网 ACR，部署时从 GitHub Actions 运行摘要获取 `FUNASR_IMAGE`。A10 1/12 可继续手动构建 `a10-2gb`，或使用兼容的已发布镜像摘要。 [发布流程与手动构建](docs/ask.md#镜像发布) · [2026-11-14 异步版](docs/release-acr-20261114.md) · [2026-11-12 初版](docs/release-acr-20261112.md)
 
+自动发布复用以固定摘要引用的已验证运行时，只追加应用和脚本层。独立完整构建 `nvidia-modern` 时使用 `--target ask-release-full`。 [完整构建命令](docs/ask.md#镜像发布)
+
 手动发布时，使用部署环境可通过 VPC 访问的同地域 ACR 仓库和新的标签。将下例中的 `funasr-eci:gpu` 替换为待发布的本地镜像标签。
 
 ```bash
@@ -216,7 +218,7 @@ A10 1/12 的手动构建、按需启停和 Prometheus 验收见 [ASK GPU 验证]
 
 ## 验证
 
-运行单元和接口检查（当前补丁版可用 `-f Dockerfile.release` 复用已验收基础层）：
+运行单元和接口检查：
 
 ```bash
 docker build --target test -t funasr-eci:test .
