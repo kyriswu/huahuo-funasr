@@ -2,7 +2,7 @@
 
 基于 [modelscope/FunASR](https://github.com/modelscope/FunASR) 构建面向阿里云 ECI / ECS Docker 的 Linux amd64 GPU 镜像。ASR、VAD、标点和 CAM++ 模型均内置，推理运行时可以完全断网。支持内存异步任务、带签名的完成回调和显式 ACK；回调需要可访问下游的网络。
 
-默认本地构建使用 CUDA 12.6，ACR 自动发布的 `nvidia-modern` 使用 CUDA 12.8。镜像内置 CUDA 运行库、cuBLAS 和 cuDNN，宿主机需兼容的 NVIDIA 驱动和 NVIDIA Container Toolkit。 [A10 24 GB ECS 部署与回调教程](docs/ecs-a10-async.md)
+默认本地构建使用 CUDA 12.6，ACR 自动发布的 `gpu-standard` 使用 CUDA 12.8。镜像内置 CUDA 运行库、cuBLAS 和 cuDNN，宿主机需兼容的 NVIDIA 驱动和 NVIDIA Container Toolkit。 [A10 24 GB ECS 部署与回调教程](docs/ecs-a10-async.md)
 
 支持中文文件转写、带时间戳的说话人标注，以及单人声纹注册、1:1 核验和 1:N 识别。`speaker_0` 之类的编号仅在一份录音内有效；启用声纹匹配后，另返回已注册的身份。说话人标注属于 diarization，不输出分离的重叠人声音轨。
 
@@ -136,7 +136,7 @@ sudo chown 10001:10001 /mnt/nas/funasr
 
 ## 发布到 ACR 并用于 ECI
 
-主分支自动发布只构建并推送 `nvidia-modern` 到北京内网 ACR，部署时从 GitHub Actions 运行摘要获取 `FUNASR_IMAGE`。A10 1/12 可继续手动构建 `a10-2gb`，或使用兼容的已发布镜像摘要。 [发布流程与手动构建](docs/ask.md#镜像发布) · [2026-11-14 异步版](docs/release-acr-20261114.md) · [2026-11-12 初版](docs/release-acr-20261112.md)
+主分支通过 `gpu-standard` 工作流自动发布 GPU 标准版到北京内网 ACR。部署时从运行摘要获取 `FUNASR_IMAGE`。标准版的 Node01 构建配置为 `nvidia-modern`。A10 1/12 可继续手动构建 `a10-2gb`，或使用兼容的已发布镜像摘要。 [发布流程与手动构建](docs/ask.md#镜像发布) · [2026-11-14 异步版](docs/release-acr-20261114.md) · [2026-11-12 初版](docs/release-acr-20261112.md)
 
 自动发布复用以固定摘要引用的已验证运行时，只追加应用和脚本层。独立完整构建 `nvidia-modern` 时使用 `--target ask-release-full`。 [完整构建命令](docs/ask.md#镜像发布)
 

@@ -1,4 +1,4 @@
-name: Publish FunASR GPU image
+name: gpu-standard
 
 on:
   pull_request:
@@ -60,7 +60,7 @@ jobs:
           docker buildx build --check --platform linux/amd64 --target ask-release --build-arg BUILD_PROFILE=nvidia-modern --build-arg ASK_MODERN_BASE=scratch .
 
   publish:
-    name: Build and publish on Node01 (${{ matrix.gpu_profile }})
+    name: Build and publish ${{ matrix.release_name }} on Node01
     needs: validate
     if: >-
       github.repository == 'kyriswu/huahuo-funasr' &&
@@ -71,7 +71,9 @@ jobs:
       max-parallel: 1
       fail-fast: false
       matrix:
-        gpu_profile: [nvidia-modern]
+        include:
+          - release_name: gpu-standard
+            gpu_profile: nvidia-modern
     permissions:
       contents: read
       id-token: write
@@ -101,6 +103,7 @@ jobs:
       - name: Record the published image
         env:
           FUNASR_IMAGE: ${{ steps.node01.outputs.FUNASR_IMAGE }}
+          FUNASR_RELEASE_NAME: ${{ matrix.release_name }}
         run: |
-          printf '::notice::Published %s %s\n' "$FUNASR_BUILD_PROFILE" "$FUNASR_IMAGE"
-          printf '### FunASR GPU profile %s\n\n`%s`\n' "$FUNASR_BUILD_PROFILE" "$FUNASR_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf '::notice::Published %s %s\n' "$FUNASR_RELEASE_NAME" "$FUNASR_IMAGE"
+          printf '### FunASR %s\n\n`%s`\n' "$FUNASR_RELEASE_NAME" "$FUNASR_IMAGE" >> "$GITHUB_STEP_SUMMARY"

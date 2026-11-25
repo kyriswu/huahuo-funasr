@@ -2,7 +2,7 @@
 
 ## 镜像发布
 
-主分支自动发布只构建并推送 Linux amd64 的 `nvidia-modern`。工作流复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。测试通过后，工作流调用 Node01 的 FunASR 固定云助手命令，将镜像推送到 `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`。 [GitHub Actions 工作流](../.github/workflows/publish-acr.yml)
+主分支通过 `gpu-standard` 工作流自动发布 Linux amd64 的 GPU 标准版。工作流复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。测试通过后，工作流调用 Node01 的 FunASR 固定云助手命令，将镜像推送到 `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`。 [GitHub Actions 工作流](../.github/workflows/publish-acr.yml)
 
 - 共享角色需信任 `repo:kyriswu@5120703/huahuo-funasr@1460054211:ref:refs/heads/main`，并允许调用 FunASR 的固定命令及查询其结果。
 - Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 和 `funasr-build-profile` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
@@ -11,10 +11,10 @@
 - Node01 完整构建使用阿里云镜像站下载构建依赖，并核验 PyTorch 和 TorchAudio wheel 的上游 SHA256。构建时可以复用匹配的 Python OCI 缓存及通过原始 SHA256 校验的 FunASR 源码包。
 - 在同一个 BuildKit 构建器上，两种配置共用模型缓存。下载中断后可以续传，权重的大小及 SHA256 匹配模型清单后才会写入镜像。
 
-| 构建配置 | CUDA | 模型与用途 |
-| --- | --- | --- |
-| `a10-2gb` | 11.8 | 使用[轻量中文标点模型](../model-lock-punc-small.json)，默认 `BATCH_SIZE_S=10`，面向 A10 1/12 的 2 GB 显存优化。实际显存峰值需按下文验收。 |
-| `nvidia-modern` | 12.8 | 使用[完整生产模型集](../model-lock.json)，保留大型中英标点模型和 FP32，默认 `BATCH_SIZE_S=120`，用于驱动兼容且显存充足的 GPU。 |
+| 版本 | Node01 构建配置 | CUDA | 模型与用途 |
+| --- | --- | --- | --- |
+| `gpu-mini` | `a10-2gb` | 11.8 | 使用[轻量中文标点模型](../model-lock-punc-small.json)，默认 `BATCH_SIZE_S=10`，面向 A10 1/12 的 2 GB 显存优化。实际显存峰值需按下文验收。 |
+| `gpu-standard` | `nvidia-modern` | 12.8 | 使用[完整生产模型集](../model-lock.json)，保留大型中英标点模型和 FP32，默认 `BATCH_SIZE_S=120`，用于驱动兼容且显存充足的 GPU。 |
 
 两版均以 `DEVICE=cuda:0` 运行，ASR、VAD、标点和声纹模型都在 GPU 上。CUDA 不可用时启动报错，推理显存耗尽时返回任务错误。
 
@@ -27,7 +27,7 @@ docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=nvidia-mode
 
 ## 内网服务申请 ACS NVIDIA GPU
 
-ACS 整卡优先使用 `nvidia-modern` 的发布摘要，按表填写卡型和驱动。表中的较早架构卡型也可使用这一版，首次接入按下文确认显存峰值和真实转写。需要用 `a10-2gb` 处理其他低显存卡型时，先验证 CUDA 11.8 的驱动、GPU 架构和实际显存需求。Blackwell 卡型使用 `nvidia-modern` 的 CUDA 12.8。 [NVIDIA CUDA 架构矩阵](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html)
+ACS 整卡优先使用 `gpu-standard` 的发布摘要，按表填写卡型和驱动。表中的较早架构卡型也可使用这一版，首次接入按下文确认显存峰值和真实转写。需要用 `a10-2gb` 处理其他低显存卡型时，先验证 CUDA 11.8 的驱动、GPU 架构和实际显存需求。Blackwell 卡型使用 `gpu-standard` 的 CUDA 12.8。 [NVIDIA CUDA 架构矩阵](https://docs.nvidia.com/datacenter/tesla/drivers/latest/cuda-toolkit-driver-and-architecture-matrix.html)
 
 | `alibabacloud.com/gpu-model-series` | 架构 | `alibabacloud.com/gpu-driver-version` | 阿里云公开列出的北京可用区 |
 | --- | --- | --- | --- |
