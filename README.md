@@ -2,7 +2,7 @@
 
 基于 [modelscope/FunASR](https://github.com/modelscope/FunASR) 构建面向阿里云 ECI / ECS Docker 的 Linux amd64 GPU 镜像。ASR、VAD、标点和 CAM++ 模型均内置，推理运行时可以完全断网。支持内存异步任务、带签名的完成回调和显式 ACK；回调需要可访问下游的网络。
 
-A10 24 GB ECS 的 Docker 启动和异步接口完整示例见 [ECS 部署与回调教程](docs/ecs-a10-async.md)。CUDA Runtime 12.6、cuBLAS 和 cuDNN 已内置，不使用宿主机的 CUDA Toolkit；宿主机需 NVIDIA 驱动和 NVIDIA Container Toolkit。支持 CUDA 12.8 的驱动可以运行当前镜像。
+默认本地构建使用 CUDA 12.6，ACR 自动发布的 `nvidia-modern` 使用 CUDA 12.8。镜像内置 CUDA 运行库、cuBLAS 和 cuDNN，宿主机需兼容的 NVIDIA 驱动和 NVIDIA Container Toolkit。 [A10 24 GB ECS 部署与回调教程](docs/ecs-a10-async.md)
 
 支持中文文件转写、带时间戳的说话人标注，以及单人声纹注册、1:1 核验和 1:N 识别。`speaker_0` 之类的编号仅在一份录音内有效；启用声纹匹配后，另返回已注册的身份。说话人标注属于 diarization，不输出分离的重叠人声音轨。
 
@@ -136,13 +136,13 @@ sudo chown 10001:10001 /mnt/nas/funasr
 
 ## 发布到 ACR 并用于 ECI
 
-当前发布流程把两种 GPU 镜像推送到北京内网 ACR，部署时从工作流摘要获取对应镜像摘要。早期固定摘要和验收结果见历史发布记录。 [当前发布流程](docs/ask.md#镜像发布) · [2026-11-14 异步版](docs/release-acr-20261114.md) · [2026-11-12 初版](docs/release-acr-20261112.md)
+主分支自动发布只构建并推送 `nvidia-modern` 到北京内网 ACR，部署时从 GitHub Actions 运行摘要获取 `FUNASR_IMAGE`。A10 1/12 可继续手动构建 `a10-2gb`，或使用兼容的已发布镜像摘要。 [发布流程与手动构建](docs/ask.md#镜像发布) · [2026-11-14 异步版](docs/release-acr-20261114.md) · [2026-11-12 初版](docs/release-acr-20261112.md)
 
-手动发布时，使用部署环境可通过 VPC 访问的同地域 ACR 仓库和新的标签。
+手动发布时，使用部署环境可通过 VPC 访问的同地域 ACR 仓库和新的标签。将下例中的 `funasr-eci:gpu` 替换为待发布的本地镜像标签。
 
 ```bash
-export ACR_REGISTRY=huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com
-export ACR_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci:替换为发布标签"
+export ACR_REGISTRY=huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com
+export ACR_IMAGE="$ACR_REGISTRY/huahuo/huahuo-funasr:替换为发布标签"
 docker login "$ACR_REGISTRY"
 docker tag funasr-eci:gpu "$ACR_IMAGE"
 docker push "$ACR_IMAGE"
@@ -158,7 +158,7 @@ docker push "$ACR_IMAGE"
 export ECI_REGION_ID=cn-beijing
 export ECI_VSWITCH_ID=vsw-替换
 export ECI_SECURITY_GROUP_ID=sg-替换
-export ECI_IMAGE="$ACR_REGISTRY/ai_service/funasr-eci@sha256:1434d95d42806a9e748b7bd7dd2272740e8963d0d0823f0c089edea39bc68f60"
+export ECI_IMAGE=huahuo-docker-hub-registry.cn-beijing.cr.aliyuncs.com/ai_service/funasr-eci@sha256:1434d95d42806a9e748b7bd7dd2272740e8963d0d0823f0c089edea39bc68f60
 export ECI_NAS_SERVER=替换.nas.aliyuncs.com
 export ECI_NAS_PATH=/funasr
 # API_TOKEN 沿用前面生成的值。
@@ -180,7 +180,7 @@ python3 -m venv .venv-deploy
 
 ACK / ACK Serverless 的 ECI 虚拟节点示例使用历史镜像摘要。部署当前版本时填写对应摘要，并配置 NAS PVC 和 Secret。示例以 ClusterIP 提供服务，可经 VPC 内网或网关访问 8000 端口。 [ECI Pod 清单](deploy/ack-eci-pod.yaml)
 
-A10 1/12 的候选镜像发布、按需启停和 Prometheus 验收见 [ASK GPU 验证](docs/ask.md)。
+A10 1/12 的手动构建、按需启停和 Prometheus 验收见 [ASK GPU 验证](docs/ask.md)。
 
 镜像内的 Docker HEALTHCHECK 主要用于本机。ECI/ACK 使用示例中的 `/healthz` 和 `/readyz`。首次启动给模型校验和加载预留时间，长音频提交需要客户端与网关允许相应的请求体大小和上传耗时。
 

@@ -2,22 +2,22 @@
 
 ## 镜像发布
 
-[GitHub Actions](../.github/workflows/publish-acr.yml)复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。测试通过后，工作流调用 Node01 上的 FunASR 固定云助手命令。Node01 构建 Linux amd64 镜像，使用已有内网仓库凭据推送到 `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`，再返回固定 digest。
+主分支自动发布只构建并推送 Linux amd64 的 `nvidia-modern`。工作流复用 `huahuo-monitor` 的 `github-actions` Provider 和 `github-actions-release` 角色。测试通过后，工作流调用 Node01 的 FunASR 固定云助手命令，将镜像推送到 `huahuoai-docker-hub-registry-vpc.cn-beijing.cr.aliyuncs.com`。 [GitHub Actions 工作流](../.github/workflows/publish-acr.yml)
 
 - 共享角色需信任 `repo:kyriswu@5120703/huahuo-funasr@1460054211:ref:refs/heads/main`，并允许调用 FunASR 的固定命令及查询其结果。
 - Node01 的固定命令 `c-bj0742lf7bciz28` 读取 `funasr-source-sha` 和 `funasr-build-profile` 调用标签，使用专用 Buildx 构建器运行 [发布脚本](../deploy/publish-acr-from-node01.sh)，由实例角色获取临时凭证推送 `huahuo/huahuo-funasr`。 [固定命令入口](../deploy/node01-publish-command.sh)
-- 每次发布用同一提交在 Node01 上依次构建两个 `linux/amd64` 镜像。GitHub 运行摘要按版本记录可用于部署的 `FUNASR_IMAGE` digest。
+- GitHub Actions 运行摘要记录可用于部署的 `FUNASR_IMAGE` 固定摘要。CI 继续检查 `a10-2gb` 配置，该版本按需手动构建。
 - Node01 使用阿里云镜像站下载构建依赖，并核验 PyTorch 和 TorchAudio wheel 的上游 SHA256。构建时可以复用匹配的 Python OCI 缓存及通过原始 SHA256 校验的 FunASR 源码包。
-- 两版共用 BuildKit 的模型缓存。下载中断后可以续传，权重的大小及 SHA256 匹配模型清单后才会写入镜像。
+- 在同一个 BuildKit 构建器上，两种配置共用模型缓存。下载中断后可以续传，权重的大小及 SHA256 匹配模型清单后才会写入镜像。
 
-| 发布版本 | CUDA | 模型与用途 |
+| 构建配置 | CUDA | 模型与用途 |
 | --- | --- | --- |
 | `a10-2gb` | 11.8 | 使用[轻量中文标点模型](../model-lock-punc-small.json)，默认 `BATCH_SIZE_S=10`，面向 A10 1/12 的 2 GB 显存优化。实际显存峰值需按下文验收。 |
 | `nvidia-modern` | 12.8 | 使用[完整生产模型集](../model-lock.json)，保留大型中英标点模型和 FP32，默认 `BATCH_SIZE_S=120`，用于驱动兼容且显存充足的 GPU。 |
 
 两版均以 `DEVICE=cuda:0` 运行，ASR、VAD、标点和声纹模型都在 GPU 上。CUDA 不可用时启动报错，推理显存耗尽时返回任务错误。
 
-以下命令可在本机构建同一组镜像。
+以下命令可手动构建任一配置。A10 1/12 使用 `a10-2gb`。
 
 ```bash
 docker buildx build --platform linux/amd64 --build-arg BUILD_PROFILE=a10-2gb --target ask-release --load -t funasr-eci:a10-2gb .
@@ -55,11 +55,13 @@ python -c 'import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_dev
 
 [验证清单](../deploy/ask-smoke.yaml)为初始副本数为 0 的单副本 Deployment，使用 ECI 专有的 `k8s.aliyun.com/eci-use-specs` 请求 `ecs.sgn7i-vws-m2.xlarge` 的 A10 1/12。该档默认驱动为 GRID 470 / CUDA 11.4，使用 `a10-2gb` 镜像和 `BATCH_SIZE_S=10` 验收 CUDA 启动、转写和显存峰值。 [ASK ECI GPU 规格](https://help.aliyun.com/zh/ack/serverless-kubernetes/user-guide/create-an-eci-pod)
 
+将 `FUNASR_IMAGE` 设置为已有的 `a10-2gb` 镜像摘要，或手动构建后推送到验证集群可访问的仓库并使用其摘要。
+
 选择已有的 ASK 验证命名空间和镜像访问权限。复用该命名空间的镜像拉取配置，必要时在 Pod 模板中引用已有的 `imagePullSecrets`。清单从同命名空间的 `huahuo-funasr-ask-smoke` Secret 的 `token` 键读取测试 API token。声纹和任务数据只写入该验证 Pod。
 
 ```bash
 export ASK_NAMESPACE=ns-applications
-export FUNASR_IMAGE=registry.example.invalid/huahuo-funasr:ask-smoke
+export FUNASR_IMAGE=registry.example.invalid/huahuo-funasr:a10-2gb
 
 kubectl config current-context
 kubectl -n "$ASK_NAMESPACE" apply -f deploy/ask-smoke.yaml

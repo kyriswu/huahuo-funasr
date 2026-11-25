@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 
-# Hold the Node01 release slot for both profiles of a main-branch run.
+# Hold the Node01 release slot for each main-branch run.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && 'huahuo-funasr-acr' || format('huahuo-funasr-ci-{0}', github.run_id) }}
   cancel-in-progress: false
@@ -57,7 +57,7 @@ jobs:
       max-parallel: 1
       fail-fast: false
       matrix:
-        gpu_profile: [a10-2gb, nvidia-modern]
+        gpu_profile: [nvidia-modern]
     permissions:
       contents: read
       id-token: write
