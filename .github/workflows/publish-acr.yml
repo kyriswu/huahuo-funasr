@@ -122,3 +122,22 @@ jobs:
                   }')
             printf '::notice::Node01 diagnostic %s\n' "$diagnostic"
           done
+      - name: Read the verified runtime image from the previous release
+        run: |
+          set -euo pipefail
+          source=9287472942a82f34507d1019221ee8cdd3664987
+          image=$(timeout 30s aliyun ecs DescribeInvocationResults --region "$ACR_REGION" --RegionId "$ACR_REGION" \
+            --CommandId "$FUNASR_NODE01_PUBLISH_COMMAND_ID" --InstanceId "$FUNASR_NODE01_INSTANCE_ID" \
+            --Tag.1.Key funasr-source-sha --Tag.1.Value "$source" \
+            --Tag.2.Key funasr-build-profile --Tag.2.Value "$FUNASR_BUILD_PROFILE" \
+            --ContentEncoding PlainText --MaxResults 10 --retry-count 0 --yes |
+            jq -er --arg profile "$FUNASR_BUILD_PROFILE" --arg host "$ACR_HOST" --arg repo "$ACR_REPOSITORY" '
+              [.Invocation.InvocationResults.InvocationResult[]
+               | select(.InvocationStatus=="Success" and .ExitCode==0 and ((.Dropped // 0)==0))
+               | (.Output // "" | split("\n") | map(sub("\r$"; ""))) as $lines
+               | select($lines | index("FUNASR_BUILD_PROFILE="+$profile))
+               | $lines[] | select(startswith("FUNASR_IMAGE="+$host+"/"+$repo+"@sha256:"))
+               | sub("^FUNASR_IMAGE="; "")
+               | select(test("^[a-z0-9./-]+@sha256:[a-f0-9]{64}$"))]
+              | unique | select(length==1) | first')
+          printf '::notice::Verified baseline %s %s\n' "$source" "$image"
