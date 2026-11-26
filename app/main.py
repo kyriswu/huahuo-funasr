@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager, contextmanager
-import json
 import logging
 import secrets
 import threading
@@ -7,6 +6,8 @@ import time
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import numpy as np
@@ -14,17 +15,15 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.audio import AudioError, AudioTooLarge, decode_audio
+from app.audio import AudioClip, AudioError, AudioTooLarge, decode_audio
 from app.callbacks import parse_callback_target
 from app.engine import SpeechEngine
 from app.metrics import Metrics
 from app.settings import Settings
-from app.startup import startup_phase
 from app.tasks import TaskError, TaskManager
 from app.voiceprints import StoreError, VoiceprintExists, VoiceprintStore, match_voiceprint, validate_id
 
 logger = logging.getLogger(__name__)
-startup_logger = logging.getLogger("uvicorn.error")
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -43,8 +42,8 @@ class RequestGuard:
             return await self.app(scope, receive, send)
         headers = dict(scope.get("headers", []))
         if self.settings.api_token:
-            expected = ("Bearer " + self.settings.api_token).encode()
-            if not secrets.compare_digest(headers.get(b"authorization", b""), expected):
+            scheme, _, token = headers.get(b"authorization", b"").partition(b" ")
+            if scheme.lower() != b"bearer" or not secrets.compare_digest(token, self.settings.api_token.encode()):
                 return await JSONResponse(
                     {"detail": "Invalid or missing Bearer token"}, 401,
                     headers={"WWW-Authenticate": "Bearer"},
@@ -89,29 +88,15 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         try:
             engine = await run_in_threadpool(engine_factory, settings)
             application.state.engine = engine
-            stage_seconds = dict(getattr(engine, "startup_seconds", {}))
-            with startup_phase(stage_seconds, "load_voiceprints"):
-                application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
-            with startup_phase(stage_seconds, "start_workers"):
-                tasks = application.state.tasks = TaskManager(
-                    settings, engine, application.state.store, application.state.inference_lock, metrics, callback_sender,
-                )
-                metrics.attach(tasks, engine, settings.device)
-                tasks.start()
-            elapsed = time.monotonic() - started
-            for stage, seconds in stage_seconds.items():
-                metrics.startup_stage.labels(stage).set(seconds)
-            metrics.startup.set(elapsed)
+            application.state.store = VoiceprintStore(settings.data_dir / "voiceprints", engine.model_id)
+            tasks = application.state.tasks = TaskManager(
+                settings, engine, application.state.store, application.state.inference_lock, metrics, callback_sender,
+            )
+            metrics.attach(tasks, engine, settings.device)
+            tasks.start()
+            metrics.startup.set(time.monotonic() - started)
             application.state.ready = True
             metrics.ready.set(1)
-            startup_logger.info("%s", json.dumps({
-                "event": "funasr.startup",
-                "device": settings.device,
-                "total_seconds": round(elapsed, 6),
-                "stage_seconds": {stage: round(seconds, 6) for stage, seconds in stage_seconds.items()},
-                "checkpoint_mmap_requested": settings.model_checkpoint_mmap,
-                "checkpoint_load_modes": getattr(engine, "checkpoint_load_modes", {}),
-            }))
             try:
                 yield
             finally:
@@ -145,6 +130,17 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
     @application.exception_handler(AudioError)
     async def invalid_audio(request, error):
         return JSONResponse({"detail": str(error)}, 422)
+
+    @application.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        try:
+            return await request_validation_exception_handler(request, error)
+        except ValueError:
+            # A non-finite input can make FastAPI's validation error fail JSON serialization.
+            return JSONResponse({"detail": [
+                {"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
+                for item in error.errors()
+            ]}, 422)
 
     @application.exception_handler(VoiceprintExists)
     async def already_registered(request, error):
@@ -186,6 +182,10 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
     def selected_threshold(value):
         return settings.voiceprint_threshold if value is None else value
 
+    def decode_upload(file: UploadFile, max_seconds: int) -> AudioClip:
+        with file.file as source:
+            return decode_audio(source, settings, max_seconds)
+
     def ensure_valid_id(speaker_id):
         try:
             return validate_id(speaker_id)
@@ -214,7 +214,7 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         with inference_slot(request) as engine:
             metrics = request.app.state.metrics
             with metrics.stage.labels("sync", "decode").time():
-                clip = decode_audio(file.file, settings, settings.max_audio_seconds)
+                clip = decode_upload(file, settings.max_audio_seconds)
             records = request.app.state.store.records() if identify_speakers else None
             with metrics.stage.labels("sync", "inference").time():
                 return engine.transcribe(clip, speaker_count, records, selected_threshold(threshold))
@@ -224,7 +224,7 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
                       description="上传完成后返回任务 ID，支持查询状态和结果，也可指定回调地址。")
     def submit_task(
         request: Request,
-        file: Annotated[UploadFile, File(description="待转写的完整音频，处理完成后删除")],
+        file: Annotated[UploadFile, File(description="待转写的完整音频，解码结束后删除容器内暂存副本")],
         speaker_count: Annotated[int | None, Form(ge=1, le=30)] = None,
         identify_speakers: Annotated[bool, Form()] = False,
         threshold: Annotated[float | None, Form(ge=-1, le=1)] = None,
@@ -278,7 +278,7 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         top_k: Annotated[int, Form(ge=1, le=20)] = 5,
     ):
         with inference_slot(request) as engine:
-            clip = decode_audio(file.file, settings, settings.max_voiceprint_seconds)
+            clip = decode_upload(file, settings.max_voiceprint_seconds)
             embedding, seconds = engine.embedding(clip)
             result = match_voiceprint(embedding, request.app.state.store.records(), selected_threshold(threshold), top_k)
             return {**result, "speech_seconds": round(seconds, 3), "model_id": engine.model_id}
@@ -291,8 +291,8 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         threshold: Annotated[float | None, Form(ge=-1, le=1)] = None,
     ):
         with inference_slot(request) as engine:
-            first, first_seconds = engine.embedding(decode_audio(reference.file, settings, settings.max_voiceprint_seconds))
-            second, second_seconds = engine.embedding(decode_audio(query.file, settings, settings.max_voiceprint_seconds))
+            first, first_seconds = engine.embedding(decode_upload(reference, settings.max_voiceprint_seconds))
+            second, second_seconds = engine.embedding(decode_upload(query, settings.max_voiceprint_seconds))
             score = float(np.clip(np.dot(first, second), -1, 1))
             value = selected_threshold(threshold)
             return {"same_speaker": score >= value, "score": round(score, 6), "threshold": value,
@@ -308,7 +308,7 @@ def create_app(settings: Settings | None = None, engine_factory=SpeechEngine, ca
         if speaker_id in {"identify", "verify"}:
             raise HTTPException(422, "speaker_id is reserved")
         with inference_slot(request) as engine:
-            clip = decode_audio(file.file, settings, settings.max_voiceprint_seconds)
+            clip = decode_upload(file, settings.max_voiceprint_seconds)
             embedding, seconds = engine.embedding(clip)
             return request.app.state.store.put(speaker_id, name, embedding, seconds, replace)
 

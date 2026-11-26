@@ -50,7 +50,7 @@ def startup_models(monkeypatch, tmp_path):
     calls = []
 
     def load(path, **kwargs):
-        calls.append((path.parent.name, kwargs))
+        calls.append((path.parent.name, kwargs, loader.torch is not torch))
         if path.read_bytes().endswith(b"corrupt"):
             raise RuntimeError("Broken checkpoint")
 
@@ -84,18 +84,15 @@ def startup_models(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(("mmap", "punc_zip"), [(False, True), (True, True), (True, False)])
-def test_startup_profiles_each_model_and_only_maps_eligible_weights(tmp_path, startup_models, mmap, punc_zip):
+def test_startup_only_maps_eligible_weights_when_enabled(tmp_path, startup_models, mmap, punc_zip):
     torch, loader, calls = startup_models
     if punc_zip:
         (tmp_path / "punc" / "model.pt").write_bytes(b"PK\x03\x04")
-    engine = SpeechEngine(Settings(model_root=tmp_path, device="cpu", model_checkpoint_mmap=mmap))
-    assert {"import_torch", "import_funasr", "verify_models", "load_models"} <= engine.startup_seconds.keys()
-    for role, options in calls:
-        assert engine.startup_seconds[f"load_{role}"] >= engine.startup_seconds[f"read_{role}_checkpoint"] >= 0
+    SpeechEngine(Settings(model_root=tmp_path, device="cpu", model_checkpoint_mmap=mmap))
+    for role, options, hooked in calls:
+        assert hooked == mmap
         mapped = mmap and (role == "asr" or (role == "punc" and punc_zip))
-        actual_mode = "mmap" if mapped else "standard"
-        assert engine.checkpoint_load_modes[role] == actual_mode
-        assert options == ({"map_location": "cpu", "mmap": True} if actual_mode == "mmap" else {"map_location": "cpu"})
+        assert options == ({"map_location": "cpu", "mmap": True} if mapped else {"map_location": "cpu"})
     assert len(calls) == 4
     assert loader.torch is torch
 
@@ -105,5 +102,5 @@ def test_startup_restores_checkpoint_loader_after_failure(tmp_path, startup_mode
     (tmp_path / "asr" / "model.pt").write_bytes(b"PK\x03\x04corrupt")
     with pytest.raises(RuntimeError, match="Broken checkpoint"):
         SpeechEngine(Settings(model_root=tmp_path, device="cpu", model_checkpoint_mmap=True))
-    assert calls == [("asr", {"map_location": "cpu", "mmap": True})]
+    assert calls == [("asr", {"map_location": "cpu", "mmap": True}, True)]
     assert loader.torch is torch

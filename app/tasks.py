@@ -196,19 +196,23 @@ class TaskManager:
         try:
             source.seek(0)
             # An anonymous temporary file is reclaimed when its descriptors close, even on a crash.
-            target = task.audio = tempfile.TemporaryFile(prefix="funasr-task-")
+            target = task.audio = None if duplicate else tempfile.TemporaryFile(prefix="funasr-task-")
+            encoded_bytes = 0
             while chunk := source.read(1024 * 1024):
-                if task.audio_bytes + len(chunk) > self.settings.max_upload_mb * 1024 * 1024:
+                encoded_bytes += len(chunk)
+                if encoded_bytes > self.settings.max_upload_mb * 1024 * 1024:
                     raise AudioTooLarge("Encoded audio exceeds MAX_UPLOAD_MB")
-                with self._condition:
-                    if self._audio_bytes + len(chunk) > self.settings.max_task_audio_mb * 1024 * 1024:
-                        raise TaskError(429, "Temporary task audio capacity is full")
-                    self._audio_bytes += len(chunk)
-                    task.audio_bytes += len(chunk)
-                target.write(chunk)
+                if target is not None:
+                    with self._condition:
+                        if self._audio_bytes + len(chunk) > self.settings.max_task_audio_mb * 1024 * 1024:
+                            raise TaskError(429, "Temporary task audio capacity is full")
+                        self._audio_bytes += len(chunk)
+                        task.audio_bytes += len(chunk)
+                    target.write(chunk)
                 digest.update(chunk)
-            target.flush()
-            if task.audio_bytes == 0:
+            if target is not None:
+                target.flush()
+            if encoded_bytes == 0:
                 raise AudioError("Audio upload is empty")
             descriptor = {
                 "audio_sha256": digest.hexdigest(), "options": options,
@@ -258,11 +262,13 @@ class TaskManager:
             task.audio_bytes = 0
 
     def _run(self, task: Task) -> tuple[dict | None, dict | None]:
-        clip = None
         try:
-            assert task.audio is not None
-            with self.metrics.stage.labels("async", "decode").time():
-                clip = decode_audio(task.audio, self.settings, self.settings.max_audio_seconds)
+            try:
+                assert task.audio is not None
+                with self.metrics.stage.labels("async", "decode").time():
+                    clip = decode_audio(task.audio, self.settings, self.settings.max_audio_seconds)
+            finally:
+                self._delete_audio(task)
             records = self.store.records() if task.options["identify_speakers"] else None
             with self.metrics.stage.labels("async", "inference").time():
                 result = self.engine.transcribe(clip, task.options["speaker_count"], records, task.options["threshold"])
@@ -279,10 +285,6 @@ class TaskManager:
                 self.metrics.gpu_oom.inc()
                 return None, {"code": "gpu_memory_exhausted", "message": "Reduce BATCH_SIZE_S or audio length"}
             return None, {"code": "processing_failed", "message": "Processing failed; check service logs"}
-        finally:
-            # The uploaded/decoded audio is never retained for delivery retries.
-            clip = None
-            self._delete_audio(task)
 
     def _finish(self, task: Task, result: dict | None, error: dict | None):
         status = "failed" if error is not None else "succeeded"

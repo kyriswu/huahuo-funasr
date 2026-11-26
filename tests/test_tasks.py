@@ -5,6 +5,7 @@ import time
 from fastapi.testclient import TestClient
 import pytest
 
+from app.audio import decode_audio
 from app.main import create_app
 from app.settings import Settings
 from conftest import wav_bytes
@@ -34,15 +35,23 @@ def acknowledge(client, task_id, event):
     return client.post(f"/v1/tasks/{task_id}/ack", json={"event_id": event["event_id"]})
 
 
-def test_status_result_ack_and_audio_lifecycle(tmp_path, audio_bytes):
+def test_status_result_ack_and_audio_lifecycle(tmp_path, audio_bytes, monkeypatch):
+    sources = []
+
+    def decode_and_record(source, settings, max_seconds):
+        sources.append(source)
+        return decode_audio(source, settings, max_seconds)
+
+    monkeypatch.setattr("app.tasks.decode_audio", decode_and_record)
     with TestClient(create_app(Settings(data_dir=tmp_path, max_pending_tasks=1), FakeEngine)) as client:
         engine, manager = client.app.state.engine, client.app.state.tasks
         engine.block = True
         task_id = submit(client, audio_bytes, speaker_count=2)
         assert engine.entered.wait(5)
         try:
-            staged = manager._tasks[task_id].audio
-            assert not staged.closed, "Input must remain until inference finishes"
+            staged, = sources
+            assert staged.closed and manager._tasks[task_id].audio is None
+            assert manager.capacity_usage() == (1, 0)
             status = client.get(f"/v1/tasks/{task_id}").json()
             assert status["status"] == "running" and "result" not in status
             assert client.get(f"/v1/tasks/{task_id}/result").status_code == 409
@@ -53,7 +62,6 @@ def test_status_result_ack_and_audio_lifecycle(tmp_path, audio_bytes):
         finally:
             engine.unblock.set()
         wait_status(client, task_id)
-        assert staged.closed and manager._tasks[task_id].audio is None
         first = client.get(f"/v1/tasks/{task_id}/result")
         second = client.get(f"/v1/tasks/{task_id}/result")
         assert first.status_code == 200 and first.content == second.content
@@ -85,6 +93,25 @@ def test_unconsumed_results_never_expire_and_hold_capacity(tmp_path, audio_bytes
         event = client.get(f"/v1/tasks/{task_id}/result").json()
         acknowledge(client, task_id, event)
         assert submit(client, audio_bytes) != task_id
+
+
+def test_idempotent_retry_works_with_audio_capacity_reserved(tmp_path):
+    settings = Settings(data_dir=tmp_path, max_pending_tasks=1, max_task_audio_mb=1, max_upload_mb=1)
+    audio = wav_bytes(seconds=20)
+    headers = {"Idempotency-Key": "unsure-202"}
+    with TestClient(create_app(settings, FakeEngine)) as client:
+        manager = client.app.state.tasks
+        with manager.inference_lock:
+            original = client.post("/v1/tasks", files={"file": ("audio.wav", audio)}, headers=headers)
+            assert original.status_code == 202 and manager.capacity_usage() == (1, len(audio))
+            duplicate = client.post("/v1/tasks", files={"file": ("audio.wav", audio)}, headers=headers)
+            assert duplicate.status_code == 202 and duplicate.json()["task_id"] == original.json()["task_id"]
+            conflict = client.post("/v1/tasks", files={"file": ("audio.wav", audio)}, headers=headers,
+                                   data={"speaker_count": 2})
+            assert conflict.status_code == 409
+            oversized = client.post("/v1/tasks", files={"file": ("audio.wav", b"x" * (1024 * 1024 + 1))}, headers=headers)
+            assert oversized.status_code == 413
+            assert manager.capacity_usage() == (1, len(audio))
 
 
 def test_failed_audio_can_be_delivered_and_acknowledged(tmp_path):

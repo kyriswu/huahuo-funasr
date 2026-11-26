@@ -3,19 +3,9 @@ from importlib import import_module
 from os import PathLike
 from pathlib import Path
 from threading import Lock, get_ident
-from time import perf_counter
 
 
 _loader_lock = Lock()
-
-
-@contextmanager
-def startup_phase(durations: dict[str, float], stage: str):
-    started = perf_counter()
-    try:
-        yield
-    finally:
-        durations[stage] = perf_counter() - started
 
 
 class _CheckpointTorch:
@@ -34,12 +24,10 @@ def _is_zip_checkpoint(path: Path) -> bool:
 
 
 @contextmanager
-def profile_checkpoints(model_root: Path, durations: dict[str, float], modes: dict[str, str], mmap: bool):
+def mapped_checkpoints(model_root: Path):
     checkpoints = {
-        (model_root / "asr" / "model.pt").resolve(): "asr",
-        (model_root / "vad" / "model.pt").resolve(): "vad",
-        (model_root / "punc" / "model.pt").resolve(): "punc",
-        (model_root / "speaker" / "campplus_cn_common.bin").resolve(): "speaker",
+        (model_root / "asr" / "model.pt").resolve(),
+        (model_root / "punc" / "model.pt").resolve(),
     }
     owner = get_ident()
     loader = import_module("funasr.train_utils.load_pretrained_model")
@@ -49,13 +37,8 @@ def profile_checkpoints(model_root: Path, durations: dict[str, float], modes: di
         def load(source, *args, **kwargs):
             if get_ident() == owner and isinstance(source, (str, PathLike)):
                 path = Path(source).resolve()
-                role = checkpoints.get(path)
-                if role is not None:
-                    if mmap and role in {"asr", "punc"} and _is_zip_checkpoint(path):
-                        kwargs["mmap"] = True
-                    modes[role] = "mmap" if kwargs.get("mmap") else "standard"
-                    with startup_phase(durations, f"read_{role}_checkpoint"):
-                        return torch.load(source, *args, **kwargs)
+                if path in checkpoints and _is_zip_checkpoint(path):
+                    kwargs["mmap"] = True
             return torch.load(source, *args, **kwargs)
 
         # Scope the hook to the pinned FunASR loader without changing torch.load globally.

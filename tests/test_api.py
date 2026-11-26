@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 import numpy as np
 import pytest
 
-from app.audio import AudioError
+from app.audio import AudioError, decode_audio
 from app.main import create_app
 from app.settings import Settings
 
@@ -74,6 +74,7 @@ def test_token_rejected_before_audio_parsing(tmp_path):
         assert client.get("/healthz").status_code == 200
         assert client.get("/v1/voiceprints").status_code == 401
         assert client.get("/v1/voiceprints", headers={"Authorization": "Bearer a-secret"}).status_code == 200
+        assert client.get("/v1/voiceprints", headers={"Authorization": "bearer a-secret"}).status_code == 200
         assert client.post("/v1/transcriptions", content=b"not multipart").status_code == 401
 
 
@@ -85,13 +86,29 @@ def test_input_errors_and_unknown_gallery(client, audio_bytes):
     assert not unknown["matched"] and unknown["speaker_id"] is None
 
 
+def test_invalid_ack_number_returns_validation_error(tmp_path):
+    app = create_app(Settings(data_dir=tmp_path), FakeEngine)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/v1/tasks/task_example/ack", content='{"event_id":1e400}',
+                               headers={"Content-Type": "application/json"})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "event_id"]
+
+
 def test_requests_do_not_reuse_previous_speaker_count(client, audio_bytes):
     assert client.post("/v1/transcriptions", files={"file": ("a.wav", audio_bytes)}, data={"speaker_count": 2}).status_code == 200
     assert client.post("/v1/transcriptions", files={"file": ("a.wav", audio_bytes)}).status_code == 200
     assert client.app.state.engine.counts == [2, None]
 
 
-def test_inference_busy_does_not_block_health(client, audio_bytes):
+def test_inference_busy_does_not_block_health(client, audio_bytes, monkeypatch):
+    sources = []
+
+    def decode_and_record(source, settings, max_seconds):
+        sources.append(source)
+        return decode_audio(source, settings, max_seconds)
+
+    monkeypatch.setattr("app.main.decode_audio", decode_and_record)
     engine = client.app.state.engine
     engine.block = True
     responses = []
@@ -99,6 +116,8 @@ def test_inference_busy_does_not_block_health(client, audio_bytes):
     thread.start()
     assert engine.entered.wait(5)
     try:
+        source, = sources
+        assert source.closed
         busy = client.post("/v1/transcriptions", files={"file": ("a.wav", audio_bytes)})
         assert busy.status_code == 429 and busy.headers["Retry-After"] == "2"
         assert client.get("/healthz").status_code == 200

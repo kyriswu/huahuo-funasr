@@ -52,14 +52,6 @@ ACS 整卡优先使用 `gpu-standard` 的发布摘要，按表填写卡型和驱
 python -c 'import torch; print(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0), torch.cuda.get_arch_list())'
 ```
 
-### 冷启动对照
-
-使用同一镜像摘要、GPU 卡型、驱动和资源规格。两组各创建全新的 Pod，在创建 Job 时把 `MODEL_CHECKPOINT_MMAP=0` 或 `MODEL_CHECKPOINT_MMAP=1` 写入容器环境变量。记录镜像拉取、容器 `Started` 和首次观察到 `Ready` 的时间点。
-
-回收前从 Pod 日志提取 `funasr.startup` JSON。`total_seconds` 从 FastAPI 启动钩子开始计时，到任务线程可用为止。`stage_seconds` 中 `load_models` 包含各模型的 `load_*`，其中又包含 `read_*_checkpoint`。内存映射可能把读取工作延后到模型载入阶段，因此同时对比模型载入总耗时和就绪耗时。核对 `checkpoint_load_modes`，确认 ASR 和标点权重实际使用了 `mmap` 或 `standard`。配置私网指标端口 `METRICS_PORT` 后，也可抓取 `funasr_startup_duration_seconds` 和 `funasr_startup_stage_duration_seconds`。
-
-用同一音频和验收参数测每个 Pod 的首条结果耗时与 `processing_seconds`，并比较文本、时间戳和说话人分段。保存结果并 ACK 后再回收 Pod。
-
 ## ECI 2 GB 验证
 
 [验证清单](../deploy/ask-smoke.yaml)为初始副本数为 0 的单副本 Deployment，使用 ECI 专有的 `k8s.aliyun.com/eci-use-specs` 请求 `ecs.sgn7i-vws-m2.xlarge` 的 A10 1/12。该档默认驱动为 GRID 470 / CUDA 11.4，使用 `a10-2gb` 镜像和 `BATCH_SIZE_S=10` 验收 CUDA 启动、转写和显存峰值。 [ASK ECI GPU 规格](https://help.aliyun.com/zh/ack/serverless-kubernetes/user-guide/create-an-eci-pod)
